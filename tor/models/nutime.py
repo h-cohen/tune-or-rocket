@@ -51,14 +51,16 @@ Reference path (fine-tuning): `configs/demo_ft_epilepsy.json` through `src/pipel
 * Gradient checkpointing: torch.utils.checkpoint on each PreNorm attention/MLP block (their code has none), training
   mode only.
 * Recipe (`default_recipe`): `configs/demo_ft_epilepsy.json`: AdamW (betas .9/.999), lr 2e-4, weight_decay 0.05,
-  num_epochs 100 (max_epochs 500 and patience 64 are only the early-stopping settings), batch_size 2048, cosine
-  schedule with 10 warmup epochs (warmup_frac 0.1; lr from 2e-6 to min_lr 2e-5). These are the demo's values, chosen for
+  num_epochs 100 (max_epochs 500 and patience 64 are only the early-stopping settings), batch_size 2048. Their
+  schedule is cosine with 10 warmup epochs (lr from 2e-6, min_lr 2e-5); the harness trainer (tor/train.py) applies
+  linear warmup only (warmup_frac 0.1), no cosine decay. These are the demo's values, chosen for
   the Epilepsy dataset (large train set): batch 2048 exceeds most UCR train sets, i.e. one full-batch step per epoch.
   `train_ft.json` has lr 2e-3, batch 1024, 200 epochs instead; the paper (as read in notes lit-c.md, not re-verified)
   gives full fine-tuning default 100 epochs, lr 2e-4, and 5 runs x 500 epochs for the UCR comparison.
-* Pretraining corpora (paper, via notes lit-c.md; the arXiv abstract page only says "over a million sequences"):
-  1.89M univariate series merged from public data including the UCR (128) and UEA (30, split into univariate) TRAIN
-  splits (test splits excluded); their `train_ssl.json` names the dataset `ucr-merged`. UCR/UEA data ARE included.
+* Pretraining corpora (the arXiv abstract page only says "over a million sequences"): the repo config
+  `configs/train_ssl.json` names the pretraining dataset "ucr-merged", so UCR inclusion is likely. The 1.89M
+  univariate series, UEA inclusion (split into univariate) and train-only splits come from our notes (lit-c.md) and
+  are NOT verified against the paper or the repo's data code.
 * Params: see test_nutime.py (measured; the paper/README give no parameter count).
 """
 from __future__ import annotations
@@ -284,14 +286,14 @@ class NuTime(FMAdapter):
     lora_targets = ("to_qkv", "to_out.0")
     pretraining_corpora = (
         "NuTime paper (Lin et al., arXiv 2310.07402, TMLR 2024), via notes lit-c.md (arXiv abstract: 'over a million "
-        "sequences'): 1.89M univariate series merged from public data (repo config dataset 'ucr-merged'), including "
-        "the TRAIN splits of the UCR (128) and UEA (30, split into univariate) archives; UCR/UEA data ARE included "
-        "(test splits excluded; overlap with downstream UCR train sets not discussed)."
+        "sequences'). Evidence: repo config configs/train_ssl.json names the pretraining dataset 'ucr-merged', so "
+        "UCR inclusion is likely. The 1.89M univariate series, UEA inclusion (split into univariate) and train-only "
+        "splits come from our notes (lit-c.md), NOT verified against the paper or the repo's data code."
     )
     recipe_source = (
         "configs/demo_ft_epilepsy.json of github.com/chenguolin/NuTime @ " + COMMIT[:10] + ": AdamW lr 2e-4, "
-        "weight_decay 0.05, num_epochs 100, batch_size 2048, cosine with 10 warmup epochs (dataset-specific demo for "
-        "Epilepsy; train_ft.json differs: lr 2e-3, bs 1024, 200 epochs; paper full-FT default 100 ep, lr 2e-4)"
+        "weight_decay 0.05, num_epochs 100, batch_size 2048 (their schedule is cosine with 10 warmup epochs; the harness trainer applies "
+        "warmup only) (dataset-specific demo for Epilepsy; train_ft.json differs: lr 2e-3, bs 1024, 200 epochs; paper full-FT default 100 ep, lr 2e-4)"
     )
 
     def __init__(self):
