@@ -54,6 +54,8 @@ def load_secrets(path: Path = DEFAULT_SECRETS_PATH) -> None:
 
 
 def redact(s: str) -> str:
-    for v in sorted(_SECRETS, key=len, reverse=True):
+    values = set(_SECRETS)
+    values.update(os.environ[k] for k in SECRET_KEYS if os.environ.get(k))
+    for v in sorted(values, key=len, reverse=True):
         s = s.replace(v, "***")
     return s

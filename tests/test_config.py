@@ -1,7 +1,15 @@
 import os
-from pathlib import Path
+
+import pytest
 
 from tor import config
+
+
+@pytest.fixture(autouse=True)
+def _clean_secrets():
+    config._SECRETS.clear()
+    yield
+    config._SECRETS.clear()
 
 
 def test_phase_defaults_to_zero(monkeypatch):
@@ -14,11 +22,9 @@ def test_load_secrets_sets_env_without_overwriting(monkeypatch, tmp_path):
     f.write_text("HF_TOKEN=abc\nTABPFN_TOKEN=xyz\n")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setenv("TABPFN_TOKEN", "keep")
-    config._SECRETS.clear()
     config.load_secrets(f)
     assert os.environ["HF_TOKEN"] == "abc"
     assert os.environ["TABPFN_TOKEN"] == "keep"
-    config._SECRETS.clear()
 
 
 def test_redact_masks_secret_values(monkeypatch, tmp_path):
@@ -26,10 +32,8 @@ def test_redact_masks_secret_values(monkeypatch, tmp_path):
     f.write_text("HF_TOKEN=abc\nTABPFN_TOKEN=xyz\n")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("TABPFN_TOKEN", raising=False)
-    config._SECRETS.clear()
     config.load_secrets(f)
     assert config.redact("token abc here") == "token *** here"
-    config._SECRETS.clear()
 
 
 def test_cache_dir_falls_back_when_data_unwritable(monkeypatch):
@@ -41,3 +45,9 @@ def test_cache_dir_falls_back_when_data_unwritable(monkeypatch):
     )
     s = config.get_settings()
     assert s.cache_dir == s.repo_root / "cache"
+
+
+def test_redact_masks_env_secrets_without_load(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "sekret")
+    monkeypatch.delenv("TABPFN_TOKEN", raising=False)
+    assert config.redact("x sekret y") == "x *** y"
