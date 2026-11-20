@@ -18,6 +18,7 @@ from typing import Callable, Literal
 
 import numpy as np
 
+from tor.config import redact
 from tor.cost import measure
 from tor.probes.shapes import ProbeShape
 from tor.runlog import RunRecord, new_record
@@ -31,6 +32,27 @@ NO_WEIGHTS = "not_run: tabpfn weights unavailable"
 
 
 # ------------------------------------------------------------------ timing core
+
+def _weights_unavailable(e: BaseException) -> bool:
+    """True only for typed gated/licence/auth failures anywhere in the exception chain:
+    tabpfn.errors.TabPFNLicenseError / TabPFNHuggingFaceGatedRepoError and
+    huggingface_hub GatedRepoError / RepositoryNotFoundError / HfHubHTTPError with 401 or 403."""
+    from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+    from tabpfn.errors import TabPFNHuggingFaceGatedRepoError, TabPFNLicenseError
+    typed = (TabPFNLicenseError, TabPFNHuggingFaceGatedRepoError, GatedRepoError,
+             RepositoryNotFoundError)
+    seen = set()
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if isinstance(e, typed):
+            return True
+        if isinstance(e, HfHubHTTPError):
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (401, 403):
+                return True
+        e = e.__cause__ or e.__context__
+    return False
+
 
 def synth(n: int, shape: ProbeShape, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """Gaussian noise series (n, channels, length) and balanced labels over N_CLASSES."""
@@ -96,15 +118,15 @@ def time_arm(arm, name: str, shape: ProbeShape, n_series: int, cfg: dict, thread
                 extra[f"{s}_s_per_1000"] = extra[f"{s}_s"] / n_series * 1000
             extra.update(getattr(arm, "details", {}))
         except Exception as e:  # noqa: BLE001 - every failure becomes a record
-            msg = f"{type(e).__name__}: {str(e)[:1000]}"
-            low = msg.lower()
-            if any(m in low for m in ("license", "gated", "failed to download", "huggingface")):
+            msg = redact(f"{type(e).__name__}: {str(e)[:1000]}")
+            tb = redact(traceback.format_exc()[-1500:])
+            if _weights_unavailable(e):
                 status = NO_WEIGHTS
                 extra["reason"] = msg
             else:
                 status = "error"
                 extra["error"] = msg
-                extra["traceback_tail"] = traceback.format_exc()[-1500:]
+            extra["traceback_tail"] = tb
             extra.update(getattr(arm, "details", {}))
     return new_record(f"baseline-{name}-{int(time.time() * 1000)}", "baseline", cfg, status,
                       cost=cost.to_dict(), extra=extra)
@@ -213,6 +235,11 @@ MASHT_UNSPECIFIED = [
 ]
 
 
+# MASHT App. A as extracted lists 88 estimators; possibly a typo for 8 (unverified).
+MASHT_ESTIMATORS_PAPER = {"n_estimators_paper": 88,
+                          "n_estimators_paper_note": "possibly a typo for 8"}
+
+
 def masht_budget(n_total: int) -> int:
     """[MASHT Sec. 3] feature budget by total (train+test) instances."""
     return 10_000 if n_total < 1000 else (2_000 if n_total < 100_000 else 200)
@@ -226,7 +253,8 @@ class MashtArm:
         self.make_classifier, self.threads, self.seed = make_classifier, threads, seed
         self.budget = masht_budget(n_total) if budget is None else budget
         self.details = {"budget": self.budget, "n_total_for_budget": n_total,
-                        "citations": MASHT_CITATIONS, "unspecified": list(MASHT_UNSPECIFIED)}
+                        "citations": MASHT_CITATIONS, "unspecified": list(MASHT_UNSPECIFIED),
+                        **MASHT_ESTIMATORS_PAPER, "n_estimators_used": N_ESTIMATORS}
 
     def fit(self, X, y):
         from aeon.transformations.collection.convolution_based import HydraTransformer, MultiRocket
@@ -302,8 +330,9 @@ def tabpfn_cfg(recipe: str, shape: ProbeShape, n_series: int, hosted: bool, thre
                device: str, masht_budget_override: int | None = None) -> dict:
     cfg = {"model": recipe, "mode": "hosted" if hosted else f"local-{device}",
            "length": shape.length, "channels": shape.channels, "n_series": n_series,
-           "threads": threads, "hosted": hosted, "n_estimators": N_ESTIMATORS}
+           "threads": threads, "hosted": hosted, "n_estimators_used": N_ESTIMATORS}
     if recipe == "masht":
+        cfg.update(MASHT_ESTIMATORS_PAPER)
         cfg["budget"] = (masht_budget(2 * n_series) if masht_budget_override is None
                          else masht_budget_override)
     return cfg

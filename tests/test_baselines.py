@@ -121,3 +121,50 @@ def test_run_arms_resumable(tmp_path, fake_tabpfn):
     run_arms(["minirocket"], shapes, runner, log, n_series=30, threads=2)
     run_arms(["minirocket"], shapes, runner, log, n_series=30, threads=2)
     assert len(calls) == 1 and len(read_all(log)) == 1
+
+
+def _failing_arm(exc):
+    class A:
+        details = {}
+
+        def fit(self, X, y):
+            raise exc
+
+    return A()
+
+
+def _run_failing(exc):
+    return ta.time_arm(_failing_arm(exc), "x", SHAPE, 10, {"model": "x"}, 1)
+
+
+def test_weights_classification_is_typed():
+    from huggingface_hub.errors import GatedRepoError
+    rec = _run_failing(RuntimeError("something about huggingface license gated failed to download"))
+    assert rec.status == "error" and rec.extra["traceback_tail"]
+    try:
+        import httpx
+        resp = httpx.Response(403, request=httpx.Request("GET", "https://huggingface.co/x"))
+        raise GatedRepoError("gated", response=resp)
+    except GatedRepoError as g:
+        wrapped = RuntimeError("Failed to download")
+        wrapped.__cause__ = g
+    rec = _run_failing(wrapped)
+    assert rec.status == ta.NO_WEIGHTS and rec.extra["traceback_tail"]
+    from tabpfn.errors import TabPFNLicenseError
+    assert _run_failing(TabPFNLicenseError("x")).status == ta.NO_WEIGHTS
+
+
+def test_secrets_scrubbed_from_errors(monkeypatch):
+    monkeypatch.setenv("TABPFN_TOKEN", "tpfn-secret-123")
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_456")
+    rec = _run_failing(RuntimeError("boom tpfn-secret-123 and hf_secret_456"))
+    blob = str(rec)
+    assert "tpfn-secret-123" not in blob and "hf_secret_456" not in blob
+
+
+def test_masht_estimator_deviation_recorded(fake_tabpfn, monkeypatch):
+    monkeypatch.setenv("TABPFN_TOKEN", "dummy")
+    rec = time_tabpfn("masht", SHAPE, n_series=40, hosted=True, threads=2)
+    assert rec.config["n_estimators_paper"] == 88 and rec.config["n_estimators_used"] == 8
+    assert rec.extra["n_estimators_paper"] == 88 and rec.extra["n_estimators_used"] == 8
+    assert "typo" in rec.extra["n_estimators_paper_note"]
