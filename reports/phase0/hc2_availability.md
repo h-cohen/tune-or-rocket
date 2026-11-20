@@ -31,12 +31,15 @@ Every available dataset has 30 resamples (columns 0 to 29) in every file.
 
 ## Datasets without published results
 
-- UCR, HC2 and MR-Hydra (same 16): AllGestureWiimoteX, AllGestureWiimoteY,
+- UCR, HC2 and MR-Hydra (same 16 datasets): AllGestureWiimoteX, AllGestureWiimoteY,
   AllGestureWiimoteZ, DodgerLoopDay, DodgerLoopGame, DodgerLoopWeekend, Fungi,
   GestureMidAirD1, GestureMidAirD2, GestureMidAirD3, GesturePebbleZ1, GesturePebbleZ2,
   MelbournePedestrian, PLAID, PickupGestureWiimoteZ, ShakeGestureWiimoteZ.
-  These are the 16 variable-length or missing-value datasets that the 112-dataset
-  bake-off set excludes. `Bakeoff2023` lists `...Eq` variants (e.g. `AllGestureWiimoteXEq`),
+  15 of these 16 are variable-length or missing-value datasets that the 112-dataset
+  bake-off set excludes. Fungi is the exception: in our metadata it is equal-length with
+  no missing values (18 train cases, 18 classes), so it is excluded for a reason not
+  established here (one training case per class may be the cause; unverified).
+  `Bakeoff2023` lists `...Eq` variants (e.g. `AllGestureWiimoteXEq`),
   which are different, equal-length-processed datasets. We do not alias them.
 - UEA, HC2 (4): CharacterTrajectories, InsectWingbeat, JapaneseVowels, SpokenArabicDigits.
 - UEA, MR-Hydra: all 30.
@@ -53,12 +56,13 @@ metadata, so nothing was aliased.
 - Verified in installed code: the `get_estimator_results` docstring says "The first
   resample is the default train/test split for the dataset" (`num_resamples=1` returns
   resample 0 only). This is aeon's statement about its loader of these files.
-- Not verified by us: the bake-off papers (Middlehurst, Large, Flynn, Lines, Bagnall,
-  Bagnall 2021 for HC2; Middlehurst, Schaefer, Bagnall 2024 for the UCR bake-off redux)
-  are believed to use resample 0 as the original split, with resamples 1 to 29 stratified
-  resamples of the combined data. Full text was not read for this. Confirm before
-  citing it as paper-backed. The same convention is assumed, not verified, for the UEA
-  HC2 file.
+- Primary source for the UCR files: Bake off redux (Middlehurst, Schaefer, Bagnall 2024,
+  arXiv 2304.13029), as verified by the reviewer: "Resample 0 uses the original train and
+  test split from the UCR archive." and "We resample each pair of train/test data 30 times
+  ... stratifying to retain the same class distribution." So resample 0 is the official
+  split and resamples 1 to 29 are stratified resamples.
+- Not verified: that the UEA file `HIVE-COTEV2/HC2_TESTFOLDS.csv` follows the same
+  convention (assumed from tsml practice, not checked).
 
 ## Usage restriction
 
