@@ -182,12 +182,12 @@ def _body(adapter_name, mode, shape, n_series, warmup_epochs, timed_epochs, grad
 
 # ---------------------------------------------------------------- isolation
 
-def _rid(cfg: dict) -> str:
-    return f"probe-{cfg['model']}-{cfg['mode']}-{int(time.time() * 1000)}"
+def _rid(cfg: dict, kind: str = "probe") -> str:
+    return f"{kind}-{cfg['model']}-{cfg['mode']}-{int(time.time() * 1000)}"
 
 
-def _not_run(cfg: dict, reason: str, extra: dict | None = None) -> RunRecord:
-    return new_record(_rid(cfg), "probe", cfg, "not_run: " + reason, extra=extra or {})
+def _not_run(cfg: dict, reason: str, extra: dict | None = None, kind: str = "probe") -> RunRecord:
+    return new_record(_rid(cfg, kind), kind, cfg, "not_run: " + reason, extra=extra or {})
 
 
 def _run_cfg(cfg: dict, device: str | None, gpu_index: int | None = None,
@@ -209,7 +209,8 @@ def _progress_writer(out_path: str):
 
 
 def _child_main(cfg: dict, out_path: str, marker_path: str, device: str | None,
-                threads: int = 16) -> None:
+                threads: int = 16, run_cfg=None, kind: str = "probe") -> None:
+    run_cfg = run_cfg or _run_cfg
     limit_threads(threads)
     load_secrets()
     for mod in filter(None, os.environ.get(EXTRA_MODULES_ENV, "").split(",")):
@@ -220,14 +221,14 @@ def _child_main(cfg: dict, out_path: str, marker_path: str, device: str | None,
             try:
                 lease = acquire_gpu()
             except NoGpuAvailable as e:
-                rec = _not_run(cfg, f"no idle GPU ({e})")
+                rec = _not_run(cfg, f"no idle GPU ({e})", kind=kind)
                 Path(out_path).write_text(json.dumps(asdict(rec), default=str))
                 return
             Path(marker_path).touch()  # GPU held: the timeout clock starts now
-            rec = _run_cfg(cfg, "cuda", lease.index, _progress_writer(out_path))
+            rec = run_cfg(cfg, "cuda", lease.index, _progress_writer(out_path))
         else:
             Path(marker_path).touch()
-            rec = _run_cfg(cfg, device, None, _progress_writer(out_path))
+            rec = run_cfg(cfg, device, None, _progress_writer(out_path))
         Path(out_path).write_text(json.dumps(asdict(rec), default=str))
     finally:
         if lease is not None:
@@ -235,15 +236,17 @@ def _child_main(cfg: dict, out_path: str, marker_path: str, device: str | None,
 
 
 def isolated_runner(timeout_s: float = 1800, device: str | None = None,
-                    threads: int = 16) -> Runner:
+                    threads: int = 16, run_cfg=None, kind: str = "probe") -> Runner:
     """Runner executing each cell in a spawned child, killed after timeout_s of run time
-    (time waiting for a GPU lease does not count). device None = child leases a GPU."""
+    (time waiting for a GPU lease does not count). device None = child leases a GPU.
+    `run_cfg(cfg, device, gpu_index, progress)` (module-level, picklable; default the probe
+    cell) and `kind` let other runners (smoke) reuse the isolation machinery."""
 
     def run(cfg: dict) -> RunRecord:
         tmp = Path(tempfile.mkdtemp(prefix="tor-probe-"))
         out, marker = tmp / "out.json", tmp / "started"
         p = mp.get_context("spawn").Process(
-            target=_child_main, args=(cfg, str(out), str(marker), device, threads))
+            target=_child_main, args=(cfg, str(out), str(marker), device, threads, run_cfg, kind))
         p.start()
         t_start = None
         try:
@@ -260,10 +263,10 @@ def isolated_runner(timeout_s: float = 1800, device: str | None = None,
                     except (OSError, ValueError):
                         pass
                     return _not_run(cfg, f"timeout ({timeout_s:g} s)", {"partial": partial,
-                                    "epoch_times_s": partial.get("epoch_times_s", [])})
+                                    "epoch_times_s": partial.get("epoch_times_s", [])}, kind)
             if out.exists():
                 return RunRecord(**json.loads(out.read_text()))
-            return new_record(_rid(cfg), "probe", cfg, "error",
+            return new_record(_rid(cfg, kind), kind, cfg, "error",
                               extra={"error": f"child exited with code {p.exitcode} without a result"})
         finally:
             if p.is_alive():
