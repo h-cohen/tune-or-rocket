@@ -9,7 +9,7 @@ description = "tune-or-rocket research harness"
 requires-python = ">=3.11"
 
 [tool.setuptools]
-packages = ["tor", "tor.data", "tor.models"]
+packages = ["tor", "tor.data", "tor.models", "tor.probes"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

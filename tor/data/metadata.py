@@ -88,14 +88,18 @@ def load_metadata() -> pd.DataFrame:
     return _as_nullable(pd.read_csv(metadata_path()))
 
 
-def length_percentiles(meta: pd.DataFrame) -> dict:
-    """p10/p50/p90/max of `length` over rows with equal_length == True and missing == False (NA excluded).
+def length_percentiles(meta: pd.DataFrame, require_no_missing: bool = True) -> dict:
+    """p10/p50/p90/max of `length` over rows with equal_length == True (NA excluded).
+
+    require_no_missing=True (default) additionally requires missing == False (NA excluded).
+    False allows missing NA/True: missingness does not change compute shape.
 
     Uses numpy.percentile with default linear interpolation, then int() (truncation).
     """
     eq = meta["equal_length"].astype("boolean") == True  # noqa: E712
     ok = meta["missing"].astype("boolean") == False  # noqa: E712
-    sel = meta[(eq & ok).fillna(False).astype(bool)]
+    keep = (eq & ok) if require_no_missing else eq
+    sel = meta[keep.fillna(False).astype(bool)]
     L = sel["length"].dropna().to_numpy(dtype=float)
     p10, p50, p90 = (int(np.percentile(L, q)) for q in (10, 50, 90))
     return {"p10": p10, "p50": p50, "p90": p90, "max": int(L.max())}
