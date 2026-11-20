@@ -65,5 +65,32 @@ def test_metadata_has_no_test_derived_reads(monkeypatch):
 
     monkeypatch.setattr(data, "load_test", boom)
     monkeypatch.setattr("tor.data.load.load_test", boom)
+    monkeypatch.setattr(aeon.datasets, "load_classification", boom)
     meta = build_metadata()
     assert len(meta) == 158
+    row = meta[meta.name == "InsectWingbeatSound"].iloc[0]
+    assert pd.isna(row["equal_length"]) and pd.isna(row["missing"])
+    assert meta[meta.archive == "UEA"]["missing"].isna().all()
+
+
+@pytest.mark.parametrize("val", [None, "", " 0", "00", "abc", "0", "-1", "1.5"])
+def test_guard_fail_closed(monkeypatch, val):
+    if val is None:
+        monkeypatch.delenv("TOR_PHASE", raising=False)
+    else:
+        monkeypatch.setenv("TOR_PHASE", val)
+    with pytest.raises(PhaseGuardError, match="Phase 0"):
+        load_test("GunPoint")
+
+
+def test_guard_allows_phase1(monkeypatch):
+    monkeypatch.setenv("TOR_PHASE", "1")
+    calls = []
+
+    def fake(name, split=None, **k):
+        calls.append(split)
+        return np.zeros((2, 1, 3)), np.array([0, 1])
+
+    monkeypatch.setattr(aeon.datasets, "load_classification", fake)
+    load_test("GunPoint")
+    assert calls == ["test"]

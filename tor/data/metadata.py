@@ -40,21 +40,44 @@ def build_metadata() -> pd.DataFrame:
         for name in sorted(names):
             key = CSV_ALIASES.get(name, name)
             r = pub.loc[key] if key in pub.index else None
-            eq = name not in unequal and (r is None or int(r["Length"]) != 0)
+            # Explicit evidence only; absence from an aeon list is not evidence for a
+            # dataset that is absent from the CSV, so those flags are NA (unknown).
+            if name in unequal or (r is not None and int(r["Length"]) == 0):
+                eq = False
+            elif r is not None:
+                eq = True
+            else:
+                eq = pd.NA
             src = SOURCE_URL + (f"#{key}" if key != name else "")
             rows.append({
                 "name": name,
                 "archive": archive,
                 "n_train": np.nan if r is None else r["TrainSize"],
                 "n_test": np.nan if r is None else r["TestSize"],
-                "length": np.nan if (r is None or not eq) else int(r["Length"]),
+                "length": int(r["Length"]) if (eq is True) else np.nan,
                 "channels": np.nan if r is None else r["Channels"],
                 "classes": np.nan if r is None else r["NumberClasses"],
                 "equal_length": eq,
-                "missing": name in missing,
+                "missing": _missing_flag(name, archive, r, missing),
                 "source_url": src if r is not None else f"{SOURCE_URL}#absent",
             })
-    return pd.DataFrame(rows, columns=COLUMNS)
+    return _as_nullable(pd.DataFrame(rows, columns=COLUMNS))
+
+
+def _missing_flag(name, archive, r, missing):
+    """UCR rows present in the CSV: explicit aeon list. Otherwise unknown (NA):
+    no published UEA missing-value list is available, and absent rows have no evidence."""
+    if name in missing:
+        return True
+    if archive == "UCR" and r is not None:
+        return False
+    return pd.NA
+
+
+def _as_nullable(df: pd.DataFrame) -> pd.DataFrame:
+    for c in ("equal_length", "missing"):
+        df[c] = df[c].astype("boolean")
+    return df
 
 
 def metadata_path() -> Path:
@@ -62,15 +85,17 @@ def metadata_path() -> Path:
 
 
 def load_metadata() -> pd.DataFrame:
-    return pd.read_csv(metadata_path())
+    return _as_nullable(pd.read_csv(metadata_path()))
 
 
 def length_percentiles(meta: pd.DataFrame) -> dict:
-    """p10/p50/p90/max of `length` over rows with equal_length & ~missing.
+    """p10/p50/p90/max of `length` over rows with equal_length == True and missing == False (NA excluded).
 
     Uses numpy.percentile with default linear interpolation, then int() (truncation).
     """
-    sel = meta[meta["equal_length"].astype(bool) & ~meta["missing"].astype(bool)]
+    eq = meta["equal_length"].astype("boolean") == True  # noqa: E712
+    ok = meta["missing"].astype("boolean") == False  # noqa: E712
+    sel = meta[(eq & ok).fillna(False).astype(bool)]
     L = sel["length"].dropna().to_numpy(dtype=float)
     p10, p50, p90 = (int(np.percentile(L, q)) for q in (10, 50, 90))
     return {"p10": p10, "p50": p50, "p90": p90, "max": int(L.max())}

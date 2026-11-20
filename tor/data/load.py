@@ -10,10 +10,19 @@ class PhaseGuardError(Exception):
     """Raised when a test split is requested during Phase 0."""
 
 
+def _test_allowed(phase: str) -> bool:
+    """Fail-closed: allowed only if phase, stripped, is a plain integer >= 1."""
+    try:
+        return int(phase.strip()) >= 1 and phase.strip().isdigit() and phase.strip() == str(int(phase.strip()))
+    except ValueError:
+        return False
+
+
 def load_test(name: str):
-    if get_settings().phase == "0":  # must stay the first statement: no import or I/O before it
+    if not _test_allowed(get_settings().phase):  # first statement: no import or I/O before it
         raise PhaseGuardError(
-            f"Phase 0: test split of {name!r} must not be read (TOR_PHASE=0)."
+            f"Phase 0: test split of {name!r} must not be read "
+            "(TOR_PHASE must be an integer >= 1 to allow it)."
         )
     return _load(name, "test")
 
