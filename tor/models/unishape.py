@@ -20,7 +20,7 @@ minimal stand-in `fastai.basics` with those three names (behaviour copied from f
 remembered; not diffed against fastai) is registered in sys.modules unless real fastai imports. `TransformerEnc`
 calls `torch.randn(...).cuda()` in its constructor, so `Tensor.cuda` is a no-op while their model is built (no GPU
 is touched). Their code needs `einops` (installed) and `timm.models.layers.trunc_normal_`: timm imports torchvision (not
-installed), so the same function (`torch.nn.init.trunc_normal_`, identical signature/defaults) is stubbed in.
+installed), so the same function (`torch.nn.init.trunc_normal_`; identity with timm's is inferred, not verified) is stubbed in.
 
 Reference path: `unishape_finetune.py` + `models/unishapemodel_finetune.py::UniShapeModel` (their classification
 fine-tuning model).
@@ -67,6 +67,7 @@ fine-tuning model).
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import importlib
 import subprocess
@@ -98,6 +99,7 @@ def clone_dir():
     return get_settings().cache_dir / "unishape" / "UniShape"
 
 
+@functools.lru_cache(maxsize=None)
 def _sha256(path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -119,12 +121,15 @@ def _check_clone() -> tuple[bool, str]:
         return False, f"UniShape clone at {head}, expected pinned {COMMIT}"
     if not (d / CKPT_REL).exists():
         return False, f"UniShape checkpoint missing: {d / CKPT_REL}"
+    if _sha256(d / CKPT_REL) != CKPT_SHA256:  # hashed once per process (56 MB)
+        return False, f"UniShape checkpoint sha256 mismatch: {d / CKPT_REL}"
     return True, ""
 
 
 def _install_timm_stub() -> None:
     """Their model imports `timm.models.layers.trunc_normal_`; timm needs torchvision, so provide the same
-    function (timm's `trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.)` is torch's) unless timm imports."""
+    function (inferred, not diffed since timm is not installed: timm's `trunc_normal_(tensor, mean=0., std=1.,
+    a=-2., b=2.)` is torch's) unless timm imports. The stubs are removed from sys.modules right after the import."""
     try:
         from timm.models.layers import trunc_normal_  # noqa: F401
         return
@@ -134,6 +139,8 @@ def _install_timm_stub() -> None:
         sys.modules[name] = types.ModuleType(name)
         sys.modules[name].__path__ = []
     sys.modules["timm.models.layers"].trunc_normal_ = nn.init.trunc_normal_
+    for name in ("timm", "timm.models", "timm.models.layers"):
+        sys.modules[name]._tor_stub = True
 
 
 def _install_fastai_stub() -> None:
@@ -174,6 +181,7 @@ def _install_fastai_stub() -> None:
     mod.Module, mod.noop, mod.init_linear = Module, noop, init_linear
     mod.__all__ = ["Module", "noop", "init_linear"]
     pkg.basics = mod
+    pkg._tor_stub = mod._tor_stub = True
     sys.modules["fastai"], sys.modules["fastai.basics"] = pkg, mod
 
 
@@ -198,6 +206,9 @@ def _their_module():
     except ImportError as e:
         del sys.modules[_PKG]
         raise AdapterUnavailable(f"UniShape imports failed: {e}") from e
+    finally:  # stubs have __spec__ None and would break find_spec("timm"/"fastai"); their modules keep references
+        for n in [n for n, m in list(sys.modules.items()) if getattr(m, "_tor_stub", False)]:
+            del sys.modules[n]
 
 
 try:

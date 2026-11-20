@@ -27,6 +27,28 @@ def test_unishape_availability_reports_reason(monkeypatch, tmp_path):
     assert not ok and "clone missing" in why
 
 
+def test_unishape_hash_mismatch_unavailable(monkeypatch):
+    import tor.models.unishape as U
+
+    monkeypatch.setattr(U, "CKPT_SHA256", "0" * 64)
+    ok, why = get_adapter("unishape").is_available()
+    assert not ok and "sha256 mismatch" in why
+
+
+def test_unishape_stubs_not_left_in_sys_modules():
+    import importlib.util
+    import sys
+
+    before = {n for n in ("timm", "fastai") if n in sys.modules}
+    a = get_adapter("unishape")
+    assert a.is_available()[0]
+    a().load("pretrained")
+    for n in ("timm", "fastai"):
+        importlib.util.find_spec(n)  # must not raise ValueError (stub __spec__ None)
+        assert (n in sys.modules) == (n in before)
+    assert not any(getattr(m, "_tor_stub", False) for m in list(sys.modules.values()))
+
+
 def test_unishape_pinned_commit_and_checkpoint_hash():
     import subprocess
 
