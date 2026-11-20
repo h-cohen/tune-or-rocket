@@ -34,6 +34,11 @@ def test_mantis_params_scratch_lora(name):
     counts = {}
     for mode in ("head", "lora", "full"):
         counts[mode] = count_params(a.classifier(3, mode, 1, 512))[1]
+    head_model = a.classifier(3, "head", 1, 512)
+    assert count_params(head_model.backbone)[1] == 0
+    a._backbone.train()
+    a.embed(a.preprocess(np.zeros((2, 1, 64))))
+    assert not a._backbone.training
     print(f"[{name}] trainable params (3 classes, 1 channel): {counts}")
     assert counts["head"] < counts["lora"] < counts["full"]
 
