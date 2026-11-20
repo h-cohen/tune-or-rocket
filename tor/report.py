@@ -232,7 +232,6 @@ def model_table(records: list[RunRecord], availability: pd.DataFrame, fits_shape
             part = full.extra.get("partial") or {}
             pa = full.cost.get("peak_gpu_mem_mib")
             pr = full.extra.get("peak_gpu_mem_reserved_mib")
-            tag = ""
             if pa is None and part.get("peak_gpu_mem_mib") is not None:
                 pa, tag_a = part["peak_gpu_mem_mib"], True
             else:
@@ -248,8 +247,9 @@ def model_table(records: list[RunRecord], availability: pd.DataFrame, fits_shape
         modes = info.get("supported_modes")
         rows.append({
             "model": name, "family": a.get("family"), "available": a.get("available"),
-            "licence": _licence(a), "params_total": total, "params_unused": unused,
-            "params_used": used, "params_source": psrc,
+            "licence": _licence(a), "params_total (used + unused = checkpoint + head)": total,
+            "unused (removed from checkpoint)": unused,
+            "params_used (classifier incl. head)": used, "params_source": psrc,
             "modes": ", ".join(modes) if modes else _missing(info.get("error", "no adapter info")),
             "fits_full": fits["full"], "fits_lora": fits["lora"], "fits_head": fits["head"],
             "fits_scratch": fits["scratch"], "ckpt_needed": ckpt_needed,
@@ -486,10 +486,13 @@ def render_report(runlog: Path | None = None, availability_csv: Path | None = No
             "shared or unmeasured record, flagged in `shared_flag`.", ""]
     out += ["## 2. Model table", "",
             md_table(table.drop(columns=["recipe_source", "pretraining_corpora", "notes"])), "",
-            "Params: `params_used` is the parameter count of the classifier actually built (probe field "
-            "`params_total`); `params_unused` is the checkpoint parameters removed from it (e.g. forecast "
+            "Params: `params_used (classifier incl. head)` is the parameter count of the classifier actually "
+            "built (probe field `params_total`), including the freshly initialised classification head; "
+            "`unused (removed from checkpoint)` is the checkpoint parameters dropped from it (e.g. forecast "
             "decoders; \"0 (adapter reports none)\" means the adapter defines no unused count); "
-            "`params_total` here = used + unused = checkpoint size. `params_source` names the mode and "
+            "`params_total (used + unused = checkpoint + head)` is their sum: it is the checkpoint size "
+            "plus the head, and the head size depends on the probe's n_classes=5 and channels=1 (nothing "
+            "unrecorded is subtracted). `params_source` names the mode and "
             "record they came from (full preferred; lora counts include adapter parameters). `fits_*` values: yes, yes (grad ckpt), no (oom), "
             "timeout, not_run: <reason>, missing: <reason>.", "",
             "### Recipes, pretraining corpora and availability notes", ""]

@@ -39,7 +39,7 @@ def table(recs):
 def test_missing_shown_not_imputed():
     t = table([])
     assert t.loc["mantis8m", "fits_full"] == "missing: no probe record"
-    assert t.loc["mantis8m", "params_total"].startswith("missing")
+    assert t.loc["mantis8m", "params_total (used + unused = checkpoint + head)"].startswith("missing")
     assert t.loc["mantis8m", "s_per_epoch_fits (full)"].startswith("missing")
 
 
@@ -80,12 +80,12 @@ def test_completed_beats_earlier_timeout():
 def test_params_used_is_total_minus_unused():
     t = table([probe("mantis8m", "full")])
     # probe params_total = classifier (used); checkpoint total = used + unused
-    assert (t.loc["mantis8m", "params_total"], t.loc["mantis8m", "params_unused"],
-            t.loc["mantis8m", "params_used"]) == (1100, 100, 1000)
+    assert (t.loc["mantis8m", "params_total (used + unused = checkpoint + head)"], t.loc["mantis8m", "unused (removed from checkpoint)"],
+            t.loc["mantis8m", "params_used (classifier incl. head)"]) == (1100, 100, 1000)
     assert t.loc["mantis8m", "params_source"].startswith("full: ")
     r0 = probe("toto", "full", extra={"unused_params": 0})
-    assert table([r0]).loc["toto", "params_unused"] == "0 (adapter reports none)"
-    assert table([r0]).loc["toto", "params_total"] == 1000
+    assert table([r0]).loc["toto", "unused (removed from checkpoint)"] == "0 (adapter reports none)"
+    assert table([r0]).loc["toto", "params_total (used + unused = checkpoint + head)"] == 1000
     assert t.loc["mantis8m", "peak_alloc_mib (full)"] == "200"
     assert t.loc["mantis8m", "peak_reserved_mib (full)"] == "300"
 
