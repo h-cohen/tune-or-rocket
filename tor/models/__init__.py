@@ -12,7 +12,7 @@ REGISTRY: dict[str, type[FMAdapter]] = {}
 
 # Adapter modules; each registers itself on import. Imports may fail if an
 # optional dependency is missing; available_adapters() then skips with a warning.
-_ADAPTER_MODULES = ["tor.models.inceptiontime", "tor.models.mantis", "tor.models.moment", "tor.models.chronos", "tor.models.timesfm", "tor.models.toto", "tor.models.reverso"]
+_ADAPTER_MODULES = ["tor.models.inceptiontime", "tor.models.mantis", "tor.models.moment", "tor.models.chronos", "tor.models.timesfm", "tor.models.toto", "tor.models.reverso", "tor.models.unishape"]
 
 
 def register(cls: type[FMAdapter]) -> type[FMAdapter]:
