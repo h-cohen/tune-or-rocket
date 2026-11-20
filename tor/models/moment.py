@@ -48,8 +48,12 @@ package itself uses it for pre-training, App. on pre-training, and exposes
 adapter sets it explicitly (off unless `grad_ckpt=True`).
 
 Params: T5Stack keeps an unused `embed_tokens` (vocab x d_model) because the model feeds
-`inputs_embeds`; it is part of the checkpoint and of the counts the paper reports (40/125/385M),
-but receives no gradient.
+`inputs_embeds`; it is in the checkpoint but never receives gradient. Measured totals of the loaded
+pretrained model, including these unused embeddings, are 35.3M / 109.6M / 341.2M; the model sizes
+the paper reports (40M / 125M / 385M) differ and the gap is unexplained. `classifier()` removes
+`embed_tokens` from the model it returns (set to None; it is never called), so counts from
+`count_params` on a classifier are effective counts and full/scratch have trainable == total.
+`unused_param_count()` gives the removed number; load()ed `_moment` keeps the full model.
 """
 from __future__ import annotations
 
@@ -206,9 +210,19 @@ class _MomentBase(FMAdapter):
         self._moment = net.eval()
         self._backbone = MomentBackbone(net).eval()
 
+    def unused_param_count(self) -> int:
+        """Params of the T5 `embed_tokens` that are never used (excluded from classifiers)."""
+        if self._moment is None:
+            raise RuntimeError("call load() first")
+        return self._moment.encoder.embed_tokens.weight.numel()
+
     # -- data ---------------------------------------------------------------
     def preprocess(self, X: np.ndarray) -> torch.Tensor:
         x = np.asarray(X, dtype=np.float32)
+        if np.isnan(x).any():
+            raise ValueError(
+                f"{self.name}: input contains NaN, which would be read as left padding; impute first"
+            )
         if x.ndim == 2:
             x = x[:, None, :]
         n, c, length = x.shape
@@ -237,6 +251,7 @@ class _MomentBase(FMAdapter):
             if self._init_kind != "pretrained":
                 raise RuntimeError(f"{mode} needs load('pretrained') first")
             backbone = copy.deepcopy(self._backbone)
+        backbone.encoder.embed_tokens = None  # unused (inputs_embeds are fed); see module docstring
         for p in backbone.parameters():
             p.requires_grad = True
         if grad_ckpt:
