@@ -74,6 +74,7 @@ setuptools==84.2.1
 shellingham==1.5.4
 sympy==1.14.0
 threadpoolctl==3.8.0
+timesfm==3.0.2
 tokenizers==0.23.3
 torch==2.14.1+cu126
 tqdm==4.70.1
