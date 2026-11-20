@@ -1,0 +1,16 @@
+name,family,hf_repo,weights_url,code_url,paper,available,licence,gated,status,files_gb,notes
+UniShape,classification,,https://raw.githubusercontent.com/qianlima-lab/UniShape/main/pretrained_model_ckpt/unishape_checkpoint_finetune.pth,https://github.com/qianlima-lab/UniShape,arXiv 2601.06429,True,,False,ok,0.0564,"No HF repo (HF search empty). Checkpoints in GitHub repo pretrained_model_ckpt/ (finetune 56 MB, zeroshot 51 MB). No LICENSE file in repo: licence unknown, treat as all rights reserved until clarified."
+Mantis-8M,classification,paris-noah/Mantis-8M,,https://github.com/vfeofanov/mantis,arXiv 2502.15637,True,apache-2.0,False,ok,0.0325,
+MantisV2,classification,paris-noah/MantisV2,,https://github.com/vfeofanov/mantis,arXiv 2502.15637 (v2),True,apache-2.0,False,ok,0.0168,
+NuTime,classification,,https://raw.githubusercontent.com/chenguolin/NuTime/main/ckpt/checkpoint_bias9.pth,https://github.com/chenguolin/NuTime,arXiv 2310.07402,True,mit,False,ok,0.0902,No HF repo. Checkpoint ckpt/checkpoint_bias9.pth in GitHub repo.
+MOMENT-1-small,general,AutonLab/MOMENT-1-small,,https://github.com/moment-timeseries-foundation-model/moment,arXiv 2402.03885,True,mit,False,ok,0.3033,
+MOMENT-1-base,general,AutonLab/MOMENT-1-base,,https://github.com/moment-timeseries-foundation-model/moment,arXiv 2402.03885,True,mit,False,ok,0.9079,
+MOMENT-1-large,general,AutonLab/MOMENT-1-large,,https://github.com/moment-timeseries-foundation-model/moment,arXiv 2402.03885,True,mit,False,ok,2.7711,
+Chronos-Bolt-small,forecaster,amazon/chronos-bolt-small,,https://github.com/amazon-science/chronos-forecasting,arXiv 2403.07815,True,apache-2.0,False,ok,0.1909,
+Chronos-Bolt-base,forecaster,amazon/chronos-bolt-base,,https://github.com/amazon-science/chronos-forecasting,arXiv 2403.07815,True,apache-2.0,False,ok,0.8212,
+Chronos-2,forecaster,amazon/chronos-2,,https://github.com/amazon-science/chronos-forecasting,arXiv 2510.15821,True,apache-2.0,False,ok,0.4779,
+TimesFM-2.5,forecaster,google/timesfm-2.5-200m-pytorch,,https://github.com/google-research/timesfm,arXiv 2310.10688 (TimesFM; no separate 2.5 paper),True,apache-2.0,False,ok,0.9252,Also flax and transformers variants exist; pytorch variant chosen.
+Toto,forecaster,Datadog/Toto-Open-Base-1.0,,https://github.com/DataDog/toto,arXiv 2505.14766,True,apache-2.0,False,ok,0.6057,"Toto-Open-Base-1.0 (the paper-1 era model). Newer Datadog/Toto-2.0-* family exists on HF (4m, 22m, 313m, 1B, 2.5B); not surveyed."
+Reverso,forecaster,shinfxh/reverso-base,,https://github.com/shinfxh/reverso,arXiv 2602.17634,True,,False,ok,0.0115,"2.6M model. GitHub README still says 'coming soon', but HF repo shinfxh/reverso-base (updated 2026-04-06) has config 8 layers d_model=128 (the paper's 2.6M spec) and an 11.5 MB model.safetensors. Mapping reverso-base = 2.6M is inferred from that match, not stated by the authors. HF card has no licence; GitHub repo is MIT."
+reverso-small,forecaster,shinfxh/reverso-small,,https://github.com/shinfxh/reverso,arXiv 2602.17634,True,,False,ok,0.0022,"550K model (4 layers, d_model=64). HF card has no licence; GitHub repo is MIT."
+InceptionTime,deep_ref,,,https://github.com/hfawaz/InceptionTime,arXiv 1909.04939,True,,False,ok,,trained from scratch; no pretrained weights
