@@ -1,4 +1,5 @@
 import os
+import subprocess
 import time
 
 import pytest
@@ -16,6 +17,7 @@ def fake(monkeypatch):
 
     monkeypatch.setattr(cost, "query_gpus", fake_query)
     monkeypatch.setattr(cost.os, "getloadavg", lambda: (state["load"], 0.0, 0.0))
+    monkeypatch.setattr(cost.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(cost.torch.cuda, "reset_peak_memory_stats", lambda *a, **k: None)
     monkeypatch.setattr(cost.torch.cuda, "max_memory_allocated", lambda *a, **k: 5 * 2**20)
     monkeypatch.setattr(cost.torch.cuda, "get_device_name", lambda *a, **k: "Fake GPU")
@@ -61,3 +63,54 @@ def test_wall_time_measured(fake):
     with cost.measure(None) as rec:
         time.sleep(0.05)
     assert rec.wall_s >= 0.05
+
+
+def test_block_exception_not_masked_by_finalization_failure(fake, monkeypatch):
+    class FakeOOM(RuntimeError):
+        pass
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError("smi died")
+        return [GpuState(3, 100, 0, [])]
+
+    monkeypatch.setattr(cost, "query_gpus", flaky)
+    rec_holder = []
+    with pytest.raises(FakeOOM):
+        with cost.measure(3) as rec:
+            rec_holder.append(rec)
+            raise FakeOOM("out of memory")
+    assert rec_holder[0].measure_errors
+    assert rec_holder[0].shared is None
+
+
+def test_unknown_gpu_index_is_unmeasured(fake):
+    with cost.measure(7) as rec:
+        pass
+    assert rec.shared is None
+    assert rec.measure_errors
+
+
+def test_cuda_unavailable_guard(fake, monkeypatch):
+    monkeypatch.setattr(cost.torch.cuda, "is_available", lambda: False)
+    with cost.measure(3) as rec:
+        pass
+    assert rec.peak_gpu_mem_mib is None and rec.gpu_model is None
+    assert rec.measure_errors
+    assert rec.shared is False  # pid snapshots succeeded
+
+
+def test_descendant_pid_not_counted_as_other(fake):
+    child = subprocess.Popen(["sleep", "5"])
+    try:
+        fake["pids"] = [os.getpid(), child.pid]
+        with cost.measure(3) as rec:
+            pass
+        assert rec.other_pids_start == [] and rec.other_pids_end == []
+        assert rec.shared is False
+    finally:
+        child.kill()
+        child.wait()

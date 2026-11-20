@@ -30,8 +30,9 @@ class CostRecord:
     load_end: float = 0.0
     other_pids_start: list[int] = field(default_factory=list)
     other_pids_end: list[int] = field(default_factory=list)
-    shared: bool = False
+    shared: bool | None = False  # None = co-tenancy could not be measured
     hosted: bool = False
+    measure_errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -61,14 +62,12 @@ def _own_tree() -> set[int]:
     return ours
 
 
-def _other_pids(gpu_index: int | None) -> list[int]:
-    if gpu_index is None:
-        return []
+def _other_pids(gpu_index: int) -> list[int]:
     ours = _own_tree()
     for g in query_gpus():
         if g.index == gpu_index:
             return sorted(p for p in g.other_pids if p not in ours)
-    return []
+    raise ValueError(f"gpu index {gpu_index} not reported by nvidia-smi")
 
 
 def _torch_device(gpu_index: int) -> int:
@@ -83,30 +82,66 @@ def _torch_device(gpu_index: int) -> int:
     return gpu_index
 
 
+def _try(rec: CostRecord, label: str, fn):
+    """Run fn; on failure record the reason in rec.measure_errors and return None."""
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001 - measurement must never mask the block's outcome
+        rec.measure_errors.append(f"{label}: {type(e).__name__}: {e}")
+        return None
+
+
 @contextmanager
 def measure(gpu_index: int | None, hosted: bool = False):
-    """Measure a block. gpu_index is the PHYSICAL index (used to match nvidia-smi pids)."""
-    rec = CostRecord(hosted=hosted, cpu_cores=len(os.sched_getaffinity(0)))
+    """Measure a block. gpu_index is the PHYSICAL index (used to match nvidia-smi pids).
+
+    Measurements never raise and never mask an exception from the block; a failed
+    measurement leaves its field None/empty and adds a reason to rec.measure_errors.
+    rec.shared is True on any evidence of co-tenancy, None if co-tenancy could not be
+    measured (and no evidence of sharing was found), else False.
+    """
+    rec = CostRecord(hosted=hosted)
+    rec.cpu_cores = len(os.sched_getaffinity(0))
     use_gpu = gpu_index is not None
-    dev = _torch_device(gpu_index) if use_gpu else None
-    rec.other_pids_start = _other_pids(gpu_index)
-    rec.load_start = os.getloadavg()[0]
+    cuda_ok = False
+    dev = None
+    start_pids = end_pids = None
     if use_gpu:
-        torch.cuda.reset_peak_memory_stats(dev)
+        dev = _torch_device(gpu_index)
+        cuda_ok = bool(_try(rec, "cuda_available", torch.cuda.is_available))
+        if not cuda_ok:
+            rec.measure_errors.append("cuda unavailable: no peak memory or gpu model")
+        start_pids = _try(rec, "pids_start", lambda: _other_pids(gpu_index))
+        rec.other_pids_start = start_pids or []
+    load_start = _try(rec, "load_start", lambda: os.getloadavg()[0])
+    rec.load_start = load_start if load_start is not None else float("nan")
+    if cuda_ok:
+        _try(rec, "reset_peak", lambda: torch.cuda.reset_peak_memory_stats(dev))
     t0 = time.perf_counter()
     try:
         yield rec
     finally:
         rec.wall_s = time.perf_counter() - t0
-        rec.load_end = os.getloadavg()[0]
-        rec.other_pids_end = _other_pids(gpu_index)
-        rec.torch_threads = torch.get_num_threads()
+        load_end = _try(rec, "load_end", lambda: os.getloadavg()[0])
+        rec.load_end = load_end if load_end is not None else float("nan")
         if use_gpu:
-            rec.peak_gpu_mem_mib = torch.cuda.max_memory_allocated(dev) / 2**20
-            rec.gpu_model = torch.cuda.get_device_name(dev)
-        rec.shared = bool(
+            end_pids = _try(rec, "pids_end", lambda: _other_pids(gpu_index))
+            rec.other_pids_end = end_pids or []
+        n = _try(rec, "torch_threads", torch.get_num_threads)
+        rec.torch_threads = n if n is not None else 0
+        if cuda_ok:
+            peak = _try(rec, "peak_mem", lambda: torch.cuda.max_memory_allocated(dev))
+            rec.peak_gpu_mem_mib = None if peak is None else peak / 2**20
+            rec.gpu_model = _try(rec, "gpu_model", lambda: torch.cuda.get_device_name(dev))
+        evidence = bool(
             rec.other_pids_start
             or rec.other_pids_end
-            or rec.load_start > LOAD_THRESHOLD
-            or rec.load_end > LOAD_THRESHOLD
+            or (load_start is not None and load_start > LOAD_THRESHOLD)
+            or (load_end is not None and load_end > LOAD_THRESHOLD)
         )
+        unmeasured = (
+            load_start is None
+            or load_end is None
+            or (use_gpu and (start_pids is None or end_pids is None))
+        )
+        rec.shared = True if evidence else (None if unmeasured else False)
