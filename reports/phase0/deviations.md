@@ -14,3 +14,5 @@
 - `config_hash` excludes the git commit and the device, so resumed runs keep records made at earlier commits; `--force` re-runs a cell. Each record still stores its own commit.
 - FITS and probe lengths use `require_no_missing=False` (equal-length datasets including unknown missingness; missingness does not change compute shape): p90 is 1500, versus 1496 with the no-missing filter.
 - Metadata alias: `MixedShapesRegularTrain` (archive name) maps to `MixedShapes` in the published metadata CSV (sizes and length match).
+- Thread cap exceeded in the first FITS pass: two probe CLIs ran side by side with `--jobs 1` each (16 intra-op threads each), so FITS records written before 2026-11-20 ~14:00 UTC on hpc-node9 may have run with up to 32 threads on a 16-core budget; their CPU-side timing may be inflated. Later runs use one CLI at a time with `--jobs 2` (8 threads per child). Re-measure with `--force --fits-only` if this matters.
+- Hardware: Phase 0 records so far come from hpc-node9 (RTX A6000 48 GB, shared node). Records from a different machine carry their own `gpu_model`; do not mix hardware in one timing table without saying so.
