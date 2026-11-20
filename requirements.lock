@@ -78,6 +78,7 @@ pytorch-lightning==2.6.6
 pytz==2026.6
 PyYAML==6.0.3
 regex==2026.11.19
+reverso @ git+https://github.com/shinfxh/reverso@35f724d3ccf26527f17bc774e897ff0c07d0761a
 rich==15.0.0
 rotary-embedding-torch==0.9.2
 safetensors==0.8.0
