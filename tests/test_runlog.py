@@ -44,3 +44,57 @@ def test_status_must_be_valid():
     with pytest.raises(ValueError):
         make(status="great")
     make(status="not_run: no gpu")
+
+
+def test_redacts_secret_with_quote(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", 'ab"c\\d')
+    monkeypatch.setattr(config, "_SECRETS", set())
+    p = tmp_path / "log.jsonl"
+    append(make(extra={"msg": 'x ab"c\\d y'}), p)
+    text = p.read_text()
+    assert 'ab\\"c' not in text and 'ab"c' not in text
+    assert "***" in text
+
+
+def test_versions_map_import_name_to_distribution(monkeypatch):
+    import sys
+    import types
+
+    from tor import runlog
+
+    monkeypatch.setitem(sys.modules, "chronos", types.ModuleType("chronos"))
+    monkeypatch.setattr(
+        runlog.importlib.metadata, "packages_distributions",
+        lambda: {"chronos": ["chronos-forecasting"]},
+    )
+    real = runlog.importlib.metadata.version
+
+    def fake(name):
+        if name == "chronos-forecasting":
+            return "9.9"
+        return real(name)
+
+    monkeypatch.setattr(runlog.importlib.metadata, "version", fake)
+    assert runlog.collect_versions()["chronos-forecasting"] == "9.9"
+
+
+def test_git_commit_dirty_logic(tmp_path):
+    import subprocess
+
+    from tor.runlog import current_git_commit
+
+    def git(*a):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                       cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q")
+    (tmp_path / "f.txt").write_text("1")
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs/runlog.jsonl").write_text("a\n")
+    git("add", ".")
+    git("commit", "-q", "-m", "init")
+    assert not current_git_commit(tmp_path).endswith("+dirty")
+    (tmp_path / "runs/runlog.jsonl").write_text("a\nb\n")
+    assert not current_git_commit(tmp_path).endswith("+dirty")
+    (tmp_path / "f.txt").write_text("2")
+    assert current_git_commit(tmp_path).endswith("+dirty")

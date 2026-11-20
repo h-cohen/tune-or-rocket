@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field, fields
@@ -46,25 +47,32 @@ class RunRecord:
             )
 
 
-def _git(*args: str) -> str:
+def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", *args], cwd=get_settings().repo_root, capture_output=True, text=True, check=True
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
     ).stdout
 
 
-def current_git_commit() -> str:
+def current_git_commit(repo: Path | None = None) -> str:
+    repo = Path(repo) if repo is not None else get_settings().repo_root
     try:
-        commit = _git("rev-parse", "HEAD").strip()
-        return commit + ("+dirty" if _git("status", "--porcelain").strip() else "")
+        commit = _git(repo, "rev-parse", "HEAD").strip()
+        # runs/ holds the log itself; it must not make every record dirty.
+        dirty = _git(repo, "status", "--porcelain", "--", ".", ":!runs").strip()
+        return commit + ("+dirty" if dirty else "")
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
 
 
 def collect_versions() -> dict[str, str]:
     """Versions of installed packages, read from metadata only (no heavy imports)."""
-    names = list(_BASE_PACKAGES) + [m for m in _MODEL_PACKAGES if m in sys.modules]
+    dists = list(_BASE_PACKAGES)
+    mapping = importlib.metadata.packages_distributions()
+    for mod in _MODEL_PACKAGES:
+        if mod in sys.modules:
+            dists.extend(mapping.get(mod, []))
     out = {}
-    for n in names:
+    for n in dists:
         try:
             out[n] = importlib.metadata.version(n)
         except importlib.metadata.PackageNotFoundError:
@@ -86,12 +94,28 @@ def new_record(run_id: str, kind: str, config: dict, status: str, cost: dict | N
     )
 
 
+def _redact_obj(o):
+    if isinstance(o, str):
+        return redact(o)
+    if isinstance(o, dict):
+        return {redact(str(k)): _redact_obj(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_redact_obj(v) for v in o]
+    return o
+
+
 def append(record: RunRecord, path: Path | None = None) -> None:
     path = Path(path) if path is not None else get_settings().runlog_path
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = redact(json.dumps(asdict(record), sort_keys=True, default=str)) + "\n"
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(line)
+    # Redact string values before serializing (so secrets with quotes, backslashes
+    # or non-ASCII match), then the final line as a backstop.
+    data = _redact_obj(json.loads(json.dumps(asdict(record), default=str)))
+    line = redact(json.dumps(data, sort_keys=True)) + "\n"
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))  # single syscall: no interleaving
+    finally:
+        os.close(fd)
 
 
 def read_all(path: Path | None = None) -> list[RunRecord]:
