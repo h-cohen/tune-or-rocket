@@ -9,7 +9,8 @@ description = "tune-or-rocket research harness"
 requires-python = ">=3.11"
 
 [tool.setuptools]
-packages = ["tor"]
+packages = ["tor", "tor.data"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["network: needs network access (dataset/metadata downloads)"]
