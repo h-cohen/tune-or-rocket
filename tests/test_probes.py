@@ -66,18 +66,56 @@ def test_grid_size_and_fits_shape():
 
 
 def test_oom_recorded_and_grid_continues(fake, monkeypatch):
-    calls = []
-    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(1))
+    events = probe_fakes.EVENTS
+    events.clear()
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append("empty"))
     recs = [run_probe("fake_oom64", "head", ProbeShape(40, 2, b), n_series=128,
                       warmup_epochs=1, timed_epochs=1, device="cpu") for b in (8, 32, 64)]
     assert [r.status for r in recs] == ["ok", "ok", "oom"]
-    assert calls
+    assert events[-2:] == ["oom", "empty"]  # cache emptied after the OOM, not just at start
     x = recs[0].extra
     for k in ("s_per_epoch", "s_per_1000_series", "params_total", "params_trainable",
-              "inference_s_per_1000", "epoch_times_s", "unused_params", "device"):
+              "inference_s_per_1000", "epoch_times_s", "unused_params", "device",
+              "peak_gpu_mem_reserved_mib"):
         assert k in x
     assert x["unused_params"] == 7 and x["raw_len"] == 40 and x["preprocessed_len"] == 32
     assert len(x["epoch_times_s"]) == 2 and x["grad_ckpt"] is False
+
+
+def test_oom_in_inference(fake, monkeypatch):
+    class InferOom(FakeAdapter):
+        oom_infer = True
+
+    monkeypatch.setattr(mt, "get_adapter", lambda n: InferOom)
+    r = run_probe("x", "head", ProbeShape(40, 1, 8), n_series=64, warmup_epochs=1,
+                  timed_epochs=1, device="cpu")
+    assert r.status == "oom" and len(r.extra["epoch_times_s"]) == 2
+    assert "inference_s_per_1000" not in r.extra
+
+
+def test_is_oom_markers():
+    for msg in ("CUDA out of memory", "CUBLAS_STATUS_ALLOC_FAILED", "CUDNN_STATUS_ALLOC_FAILED x"):
+        assert mt._is_oom(RuntimeError(msg))
+    assert not mt._is_oom(RuntimeError("shape mismatch"))
+
+
+def test_diverged_s_per_epoch_uses_complete_epochs_only(monkeypatch):
+    from tor.train import TrainResult
+
+    def fake_train(model, X, y, recipe, epochs, device, amp=True, on_epoch=None):
+        return TrainResult([1.0, float("nan")], [0.5, 9.0], True)
+
+    monkeypatch.setattr(mt, "train_epochs", fake_train)
+    monkeypatch.setattr(mt, "get_adapter", lambda n: FakeAdapter)
+    r = run_probe("x", "head", ProbeShape(40, 1, 8), n_series=16, warmup_epochs=1,
+                  timed_epochs=2, device="cpu")
+    assert r.status == "diverged" and r.extra["epoch_times_s"] == [0.5]
+    assert r.extra["s_per_epoch"] is None  # only the warmup epoch completed
+    fake_train2 = lambda *a, **k: TrainResult([1.0, 1.0, float("nan")], [0.5, 1.0, 9.0], True)  # noqa: E731
+    monkeypatch.setattr(mt, "train_epochs", fake_train2)
+    r = run_probe("x", "head", ProbeShape(40, 1, 8), n_series=16, warmup_epochs=1,
+                  timed_epochs=2, device="cpu")
+    assert r.extra["s_per_epoch"] == 1.0
 
 
 def test_ckpt_retry_on_fits_oom(fake, tmp_path):
@@ -129,6 +167,59 @@ def test_resume_skips_done_cells(fake, tmp_path):
     log.write_text("")
     append(new_record("old", "probe", cfg, "error"), log)
     assert len(_plan(["fake_probe"], tmp_path, runner=runner, fits_only=True)) == 1 and calls
+
+
+def _seed_log(tmp_path, shared):
+    from tor.runlog import append
+    log = tmp_path / "log.jsonl"
+    cfg = probe_config("fake_probe", "head", FITS_SHAPE(_meta()), 128, 1, 1, False)
+    append(new_record("old", "probe", cfg, "ok", cost={"shared": shared}), log)
+    return log
+
+
+@pytest.mark.parametrize("shared,expect", [(True, 1), (None, 1), (False, 0)])
+def test_rerun_shared(fake, tmp_path, shared, expect):
+    log = _seed_log(tmp_path, shared)
+    new = _plan(["fake_probe"], tmp_path, fits_only=True, rerun_shared=True)
+    assert len(new) == expect and len(read_all(log)) == 1 + expect  # old record kept
+
+
+def test_force_reruns_everything(fake, tmp_path):
+    log = _seed_log(tmp_path, False)
+    assert _plan(["fake_probe"], tmp_path, fits_only=True) == []
+    assert len(_plan(["fake_probe"], tmp_path, fits_only=True, force=True)) == 1
+    assert len(read_all(log)) == 2
+
+
+def test_cli_gives_children_threads_by_jobs(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(mt, "isolated_runner", lambda t, device=None, threads=16: seen.update(
+        threads=threads) or "r")
+    monkeypatch.setattr(mt, "run_plan", lambda *a, **k: [])
+    monkeypatch.setattr(mt, "load_metadata", lambda: None)
+    mt.main(["--model", "x", "--jobs", "2"])
+    assert seen["threads"] == 8
+    mt.main(["--model", "x", "--jobs", "5"])  # capped at 2
+    assert seen["threads"] == 8
+    mt.main(["--model", "x", "--jobs", "1"])
+    assert seen["threads"] == 16
+
+
+def test_child_thread_cap_recorded(monkeypatch):
+    monkeypatch.setenv(mt.EXTRA_MODULES_ENV, "probe_fakes")
+    monkeypatch.setenv("TOR_PROBE_FAKES_ONLY", "1")
+    cfg = probe_config("fake_probe", "head", ProbeShape(40, 1, 8), 16, 1, 1)
+    rec = isolated_runner(timeout_s=60, device="cpu", threads=2)(cfg)
+    assert rec.status == "ok" and rec.cost["torch_threads"] <= 2
+
+
+def test_timeout_includes_partial_progress(monkeypatch):
+    monkeypatch.setenv(mt.EXTRA_MODULES_ENV, "probe_fakes")
+    monkeypatch.setenv("TOR_PROBE_FAKES_ONLY", "1")
+    cfg = probe_config("fake_slow", "head", ProbeShape(40, 1, 8), 16, 1, 20)
+    rec = isolated_runner(timeout_s=8, device="cpu")(cfg)
+    assert rec.status.startswith("not_run: timeout")
+    assert len(rec.extra["epoch_times_s"]) >= 1 and "peak_gpu_mem_mib" in rec.extra["partial"]
 
 
 def test_probe_uses_no_real_data(fake, monkeypatch):

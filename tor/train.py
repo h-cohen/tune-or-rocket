@@ -33,9 +33,11 @@ def _freeze_eval(m: torch.nn.Module) -> None:
         _freeze_eval(c)
 
 
-def train_epochs(model, X, y, recipe: Recipe, epochs: int, device: str, amp: bool = True) -> TrainResult:
+def train_epochs(model, X, y, recipe: Recipe, epochs: int, device: str, amp: bool = True,
+                 on_epoch=None) -> TrainResult:
     """Train for up to `epochs`. bf16 autocast only if `amp` and device is CUDA (ignored on CPU).
 
+    `on_epoch(result)` (optional) is called after each epoch's time is recorded.
     Stops at the first non-finite loss: that epoch's loss is recorded as nan, diverged=True.
     """
     dev = torch.device(device)
@@ -74,6 +76,8 @@ def train_epochs(model, X, y, recipe: Recipe, epochs: int, device: str, amp: boo
         if dev.type == "cuda":
             torch.cuda.synchronize(dev)
         res.epoch_times_s.append(time.perf_counter() - t0)
+        if on_epoch is not None:
+            on_epoch(res)
         if bad:
             res.losses.append(float("nan"))
             res.diverged = True
