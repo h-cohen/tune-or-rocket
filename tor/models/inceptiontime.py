@@ -1,8 +1,8 @@
 """InceptionTime reference (from scratch only), in PyTorch.
 
 6 inception modules (3 per residual block), 32 filters, kernels 40/20/10, GAP head.
-Only the `scratch` mode exists. `embed` returns the GAP features of the current
-network (built by `load(("random", seed))`); it raises RuntimeError if not loaded.
+Only the `scratch` mode exists. `embed` returns GAP features (eval mode) of a
+randomly initialised network built lazily from the seed given to `load`.
 """
 from __future__ import annotations
 
@@ -52,6 +52,7 @@ class InceptionNet(nn.Module):
                 nn.Conv1d(src, d, 1, bias=False), nn.BatchNorm1d(d)
             )
         self.feature_dim = d
+        self.in_channels = c_in
         self.head = nn.Linear(d, n_classes) if n_classes else None
 
     def features(self, x):
@@ -78,8 +79,8 @@ class InceptionTime(FMAdapter):
     supported_modes: tuple[Mode, ...] = ("scratch",)
 
     def __init__(self):
-        self.in_channels = 1  # updated by preprocess from X.shape[1]
-        self._net: InceptionNet | None = None
+        self._seed = 0
+        self._net: InceptionNet | None = None  # lazily built for embed
 
     def load(self, init) -> None:
         if init == "pretrained":
@@ -87,29 +88,35 @@ class InceptionTime(FMAdapter):
         kind, seed = init
         if kind != "random":
             raise ValueError(f"bad init {init!r}")
-        torch.manual_seed(seed)
-        self._net = InceptionNet(self.in_channels)
+        self._seed = seed
+        self._net = None  # built at first embed() once the channel count is known
 
     def preprocess(self, X: np.ndarray) -> torch.Tensor:
         x = torch.as_tensor(np.asarray(X), dtype=torch.float32)
         if x.ndim == 2:
             x = x[:, None, :]
-        self.in_channels = x.shape[1]
         mu = x.mean(dim=-1, keepdim=True)
         sd = x.std(dim=-1, keepdim=True).clamp_min(1e-8)
         return (x - mu) / sd
 
     def embed(self, X: torch.Tensor) -> torch.Tensor:
-        if self._net is None:
-            raise RuntimeError("call load(('random', seed)) first")
+        if self._net is None or self._net.in_channels != X.shape[1]:
+            self._net = self._build(X.shape[1], None, self._seed)
+        self._net.eval()
         with torch.no_grad():
             return self._net.features(X)
 
-    def classifier(self, n_classes, mode, grad_ckpt=False, seed=0) -> torch.nn.Module:
-        self._check_mode(mode)
-        self.load(("random", seed))
-        torch.manual_seed(seed)
-        return InceptionNet(self.in_channels, n_classes)
+    @staticmethod
+    def _build(n_channels, n_classes, seed):
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            return InceptionNet(n_channels, n_classes)
+
+    def classifier(
+        self, n_classes, mode, n_channels, seq_len, grad_ckpt=False, seed=0
+    ) -> torch.nn.Module:
+        self._check_mode(mode, grad_ckpt)
+        return self._build(n_channels, n_classes, seed)
 
     def default_recipe(self) -> Recipe:
         return Recipe(lr=1e-3, weight_decay=0.0, epochs=1500, batch_size=64)

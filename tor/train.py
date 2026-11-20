@@ -23,6 +23,16 @@ def count_params(module: torch.nn.Module) -> tuple[int, int]:
     return total, trainable
 
 
+def _freeze_eval(m: torch.nn.Module) -> None:
+    """Put fully frozen submodules in eval() (no dropout, no BN stat updates)."""
+    ps = list(m.parameters())
+    if ps and not any(p.requires_grad for p in ps):
+        m.eval()
+        return
+    for c in m.children():
+        _freeze_eval(c)
+
+
 def train_epochs(model, X, y, recipe: Recipe, epochs: int, device: str, amp: bool = True) -> TrainResult:
     """Train for up to `epochs`. bf16 autocast only if `amp` and device is CUDA (ignored on CPU).
 
@@ -31,6 +41,7 @@ def train_epochs(model, X, y, recipe: Recipe, epochs: int, device: str, amp: boo
     dev = torch.device(device)
     use_amp = amp and dev.type == "cuda"
     model.to(dev).train()
+    _freeze_eval(model)
     X, y = X.to(dev), y.to(dev)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=recipe.lr, weight_decay=recipe.weight_decay)

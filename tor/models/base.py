@@ -12,6 +12,10 @@ Mode = Literal["head", "lora", "full", "scratch"]
 ALL_MODES: tuple[Mode, ...] = ("head", "lora", "full", "scratch")
 
 
+class AdapterUnavailable(Exception):
+    """Raised on import (or reported by is_available) when an adapter cannot be used."""
+
+
 @dataclass(frozen=True)
 class Recipe:
     lr: float
@@ -29,32 +33,57 @@ class FMAdapter(ABC):
     pretraining_corpora: str  # cited
     recipe_source: str
     supported_modes: tuple[Mode, ...] = ALL_MODES
+    supports_grad_ckpt: bool = False
     # Names of attention q/k/v/o projection modules, used for LoRA.
     lora_targets: tuple[str, ...] = ()
 
     @abstractmethod
     def load(self, init: Literal["pretrained"] | tuple[Literal["random"], int]) -> None: ...
 
+    @classmethod
+    def is_available(cls) -> tuple[bool, str]:
+        """(available, reason-if-not). Default: always available."""
+        return True, ""
+
     @abstractmethod
-    def preprocess(self, X: np.ndarray) -> torch.Tensor: ...
+    def preprocess(self, X: np.ndarray) -> torch.Tensor:
+        """Return a float32 tensor of shape (n, c, L').
+
+        How series longer than `max_length` are handled is adapter-specific and
+        documented per adapter.
+        """
 
     @abstractmethod
     def embed(self, X: torch.Tensor) -> torch.Tensor:
-        """Return features of shape (n, d)."""
+        """Return features of shape (n, d).
+
+        Per-channel adapters concatenate channel embeddings (d = d_model * C)
+        unless the adapter documents otherwise.
+        """
 
     @abstractmethod
     def classifier(
-        self, n_classes: int, mode: Mode, grad_ckpt: bool = False, seed: int = 0
+        self,
+        n_classes: int,
+        mode: Mode,
+        n_channels: int,
+        seq_len: int,
+        grad_ckpt: bool = False,
+        seed: int = 0,
     ) -> torch.nn.Module:
-        """Build a classifier. `scratch` loads ("random", seed) first, then trains like `full`.
+        """Build a classifier for inputs of shape (n, n_channels, seq_len).
 
-        Implementations must call `self._check_mode(mode)` first.
+        `seq_len` is the length AFTER preprocess. `scratch` loads ("random", seed) first, then trains like `full`.
+
+        Implementations must call `self._check_mode(mode, grad_ckpt)` first.
         """
 
     @abstractmethod
     def default_recipe(self) -> Recipe: ...
 
-    def _check_mode(self, mode: str) -> None:
+    def _check_mode(self, mode: str, grad_ckpt: bool = False) -> None:
+        if grad_ckpt and not self.supports_grad_ckpt:
+            raise ValueError(f"{self.name} does not support gradient checkpointing")
         if mode not in self.supported_modes:
             raise ValueError(
                 f"{self.name} does not support mode {mode!r}; supported: {self.supported_modes}"
