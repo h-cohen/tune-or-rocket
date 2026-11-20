@@ -35,9 +35,22 @@ ADAPTER_FOR = {
 _FORBIDDEN = re.compile(r"accuracy|\bF1\b|val_", re.IGNORECASE)
 
 
-def sanitize(text: str) -> str:
-    """The report is measurement-only: score vocabulary from embedded text is masked."""
-    return _FORBIDDEN.sub("[score term]", text)
+def sanitize(text: str, source: str = "embedded text") -> str:
+    """The report is measurement-only. Embedded text containing score vocabulary is excluded
+    as a whole block (cited prose is never rewritten)."""
+    if _FORBIDDEN.search(text):
+        return f"missing: {source} contains score vocabulary; not embedded (see file)"
+    return text
+
+
+def _cfg_values(records: list[RunRecord], key: str) -> str:
+    vals = sorted({r.config[key] for r in records if _is_probe(r) and key in r.config})
+    return "/".join(str(v) for v in vals) if vals else _missing("no probe record")
+
+
+def _n_classes() -> str:
+    from tor.probes.memtime import N_CLASSES  # constant of the probe runner, not stored per record
+    return f"{N_CLASSES} (probe-runner constant)"
 
 
 def _missing(reason: str) -> str:
@@ -53,12 +66,14 @@ def shared_label(rec: RunRecord) -> str:
 
 def pick(recs: list[RunRecord]) -> RunRecord | None:
     """Best record for one cell: completed over not_run/error, idle over shared/unmeasured,
-    latest among equals."""
+    latest among equals; if nothing completed, the latest record."""
     if not recs:
         return None
-    pool = [r for r in recs if r.status in DONE] or recs
-    idle = [r for r in pool if r.cost.get("shared") is False]
-    return (idle or pool)[-1]
+    done = [r for r in recs if r.status in DONE]
+    if not done:
+        return recs[-1]  # nothing completed: the latest attempt
+    idle = [r for r in done if r.cost.get("shared") is False]
+    return (idle or done)[-1]
 
 
 def _is_probe(r: RunRecord) -> bool:
@@ -110,6 +125,8 @@ def _fits_cell(idx: dict, records: list[RunRecord], model: str, mode: str,
             return "yes (grad ckpt)", ckpt
         if ckpt is not None and ckpt.status == "oom":
             return "no (oom)", plain
+        if ckpt is not None:
+            return f"oom; grad-ckpt retry: {ckpt.status}", plain
         no_ckpt_support = any(r.status == "not_run: no grad ckpt support" and _is_probe(r)
                               and r.config.get("model") == model and r.config.get("mode") == mode
                               for r in records)
@@ -126,7 +143,7 @@ def _fits_cell(idx: dict, records: list[RunRecord], model: str, mode: str,
             eps = ", ".join(_fmt_s(e) for e in ep) if ep else "none"
             return f"timeout ({inner}, partial epochs: {eps})", plain
         return f"not_run: {reason}", plain
-    return f"error: {sanitize(str(plain.extra.get('error', 'unknown'))[:120])}", plain
+    return "error: " + sanitize(str(plain.extra.get("error", "unknown"))[:120], "error text"), plain
 
 
 # ------------------------------------------------------------------ model table
@@ -144,23 +161,29 @@ def default_adapter_info(adapter: str) -> dict:
 
 
 def _params(idx: dict, model: str, shape: ProbeShape) -> tuple:
-    """(total, unused, used, source) from the FITS-shape records: full mode preferred."""
+    """(checkpoint total, unused, used, source) from the FITS-shape records, full mode preferred.
+
+    Semantics of the probe fields: extra.params_total = count_params(classifier) = parameters
+    the classifier actually has (USED); extra.unused_params = checkpoint parameters removed
+    from the classifier (0 when the adapter reports none). Checkpoint total = used + unused.
+    LoRA records include the adapter parameters, so lora is used only as a last resort."""
     for mode in ("full", "head", "scratch", "lora"):
         for ckpt in (False, True):
             r = pick([x for x in idx.get((model, mode, shape.length, shape.channels, shape.batch,
-                                          ckpt), []) if x.extra.get("params_total") is not None])
+                                          ckpt), []) if x.extra.get("params_total") is not None
+                      and x.status in DONE])
             if r is not None:
-                total = int(r.extra["params_total"])
+                used = int(r.extra["params_total"])
                 unused = r.extra.get("unused_params")
+                src = f"{mode}{' (includes LoRA adapter params)' if mode == 'lora' else ''}: {r.run_id}"
                 if unused is None:
-                    return total, _missing("unused count not recorded"), _missing("unused unknown"), mode
-                return total, int(unused), total - int(unused), mode
+                    return (_missing("unused count not recorded"), _missing("unused count not recorded"),
+                            used, src)
+                unused = int(unused)
+                return (used + unused, f"{unused} (adapter reports none)" if unused == 0 else unused,
+                        used, src)
     m = _missing("no probe record")
-    return m, m, m, ""
-
-
-def _short(text: str, n: int = 160) -> str:
-    return text if len(text) <= n else text[:n].rsplit(" ", 1)[0] + " ..."
+    return m, m, m, m
 
 
 def _licence(row: pd.Series) -> str:
@@ -187,44 +210,53 @@ def model_table(records: list[RunRecord], availability: pd.DataFrame, fits_shape
         fits, recs = {}, {}
         for mode in MODES:
             fits[mode], recs[mode] = _fits_cell(idx, records, name, mode, fits_shape)
-        ckpt_modes = [m for m in MODES if fits[m] == "yes (grad ckpt)"]
-        if ckpt_modes:
-            ckpt_needed = ", ".join(ckpt_modes)
-        elif all(f.startswith("missing") for f in fits.values()):
-            ckpt_needed = _missing("no probe record")
+        decisive = ("yes", "yes (grad ckpt)", "no (oom)", "diverged")
+        supp = [m for m in MODES if m in (info.get("supported_modes") or MODES)]
+        undecided = [m for m in supp if fits[m] not in decisive]
+        ckpt_modes = [m for m in supp if fits[m] == "yes (grad ckpt)"]
+        if undecided:
+            ckpt_needed = _missing("no decisive record for " + ", ".join(undecided))
         else:
-            ckpt_needed = "no"
+            ckpt_needed = ", ".join(ckpt_modes) if ckpt_modes else "no"
         full = recs["full"]
-        if full is not None and full.status == "ok":
-            s_ep = full.extra.get("s_per_epoch")
-            s_ep_txt = _fmt_s(s_ep) if s_ep is not None else _missing("no timed epochs")
-            flag = shared_label(full)
-        else:
-            s_ep_txt, flag = _missing("no ok full-mode FITS record"), ""
-        mem_a = mem_r = _missing("no ok full-mode FITS record")
+        s_ep_txt, flag, src_id = _missing("no ok full-mode FITS record"), "", _missing("no full-mode FITS record")
+        mem_a = mem_r = _missing("no full-mode FITS record")
         if full is not None:
+            flag = shared_label(full)
+            n_rec = len(idx.get((name, "full", fits_shape.length, fits_shape.channels, fits_shape.batch,
+                                 bool(full.config.get("grad_ckpt", False))), []))
+            src_id = f"{full.run_id} (chosen of {n_rec})"
+            if full.status == "ok":
+                s_ep = full.extra.get("s_per_epoch")
+                s_ep_txt = _fmt_s(s_ep) if s_ep is not None else _missing("no timed epochs")
+            part = full.extra.get("partial") or {}
             pa = full.cost.get("peak_gpu_mem_mib")
             pr = full.extra.get("peak_gpu_mem_reserved_mib")
-            if pa is None:
-                pa = (full.extra.get("partial") or {}).get("peak_gpu_mem_mib")
-            if pr is None:
-                pr = (full.extra.get("partial") or {}).get("peak_gpu_mem_reserved_mib")
-            mem_a = f"{pa:.0f}" if pa is not None else _missing("peak not measured")
-            mem_r = f"{pr:.0f}" if pr is not None else _missing("peak not measured")
-        total, unused, used, _ = _params(idx, name, fits_shape)
+            tag = ""
+            if pa is None and part.get("peak_gpu_mem_mib") is not None:
+                pa, tag_a = part["peak_gpu_mem_mib"], True
+            else:
+                tag_a = False
+            if pr is None and part.get("peak_gpu_mem_reserved_mib") is not None:
+                pr, tag_r = part["peak_gpu_mem_reserved_mib"], True
+            else:
+                tag_r = False
+            mem_a = (f"\u2265{pa:.0f} (partial, timeout)" if tag_a else f"{pa:.0f}") if pa is not None else _missing("peak not measured")
+            mem_r = (f"\u2265{pr:.0f} (partial, timeout)" if tag_r else f"{pr:.0f}") if pr is not None else _missing("peak not measured")
+        total, unused, used, psrc = _params(idx, name, fits_shape)
         hosted = any(r.cost.get("hosted") for r in records if r.config.get("model") == name)
         modes = info.get("supported_modes")
         rows.append({
             "model": name, "family": a.get("family"), "available": a.get("available"),
             "licence": _licence(a), "params_total": total, "params_unused": unused,
-            "params_used": used,
+            "params_used": used, "params_source": psrc,
             "modes": ", ".join(modes) if modes else _missing(info.get("error", "no adapter info")),
             "fits_full": fits["full"], "fits_lora": fits["lora"], "fits_head": fits["head"],
             "fits_scratch": fits["scratch"], "ckpt_needed": ckpt_needed,
-            "s_per_epoch_fits (full)": s_ep_txt, "shared_flag": flag,
+            "s_per_epoch_fits (full)": s_ep_txt, "shared_flag": flag, "fits_full_run_id": src_id,
             "peak_alloc_mib (full)": mem_a, "peak_reserved_mib (full)": mem_r,
             "hosted": "yes" if hosted else "no",
-            "recipe_source": _short(info.get("recipe_source") or _missing("no adapter info")),
+            "recipe_source": info.get("recipe_source") or _missing("no adapter info"),
             "pretraining_corpora": info.get("pretraining_corpora") or _missing("no adapter info"),
             "notes": "" if pd.isna(a.get("notes")) else str(a.get("notes")),
         })
@@ -246,7 +278,7 @@ def _classify(r: RunRecord | None) -> str:
 def grid_completeness(records: list[RunRecord], models_modes: dict[str, tuple],
                       shapes: list[ProbeShape]) -> pd.DataFrame:
     """Planned cells (supported modes x grid shapes, no grad ckpt) per model vs outcome.
-    `no_record` counts planned cells with no record at all (a subset of not_run)."""
+    `no_record` = planned cells with no log entry yet; the outcome columns sum to `planned`."""
     idx = _index(records)
     out = []
     for model, modes in models_modes.items():
@@ -263,6 +295,7 @@ def grid_completeness(records: list[RunRecord], models_modes: dict[str, tuple],
 
 def probe_grid_table(records: list[RunRecord]) -> pd.DataFrame:
     """Every probe record flattened (appendix CSV)."""
+    chosen = {pick(v).run_id for v in _index(records).values()}
     rows = []
     for r in records:
         if not _is_probe(r) or "length" not in r.config:
@@ -278,7 +311,7 @@ def probe_grid_table(records: list[RunRecord]) -> pd.DataFrame:
             "peak_reserved_mib": e.get("peak_gpu_mem_reserved_mib"),
             "params_total": e.get("params_total"), "unused_params": e.get("unused_params"),
             "wall_s": r.cost.get("wall_s"), "gpu": e.get("device"),
-            "git_commit": r.git_commit, "run_id": r.run_id,
+            "git_commit": r.git_commit, "run_id": r.run_id, "chosen_for_cell": r.run_id in chosen,
         })
     return pd.DataFrame(rows)
 
@@ -303,6 +336,8 @@ def baseline_table(records: list[RunRecord], tabpfn: bool) -> pd.DataFrame:
             "predict_s": e.get("predict_s"), "n_features": e.get("n_features"),
             "hosted": bool(r.cost.get("hosted")), "shared": shared_label(r),
             "wall_s": r.cost.get("wall_s"),
+            "reason": sanitize(str(e.get("reason") or e.get("error") or "")[:160], "reason text")
+            if (e.get("reason") or e.get("error")) else "",
         })
     return pd.DataFrame(rows)
 
@@ -373,7 +408,7 @@ def _hc2_section(path: Path) -> str:
     for h in ("Coverage (datasets with a published result / datasets in our metadata)",
               "Resample 0 and the official split", "Usage restriction"):
         body = md_section(text, h)
-        parts.append(f"**{h}**\n\n" + (sanitize(body) if body else _missing(f"section '{h}' not found")))
+        parts.append(f"**{h}**\n\n" + (sanitize(body, f"section '{h}'") if body else _missing(f"section '{h}' not found")))
     return "\n\n".join(parts)
 
 
@@ -387,7 +422,7 @@ def _literature_section(path: Path) -> str:
     body = md_section(text, "1. Search coverage")
     m = re.search(r"Could NOT be accessed:\n(.*?)(?:\n\n|\Z)", body or "", re.DOTALL)
     parts.append("Sources that could not be accessed (from the literature report):\n\n" +
-                 (sanitize(m.group(1).strip()) if m else _missing("access list not found")))
+                 (sanitize(m.group(1).strip(), "access list") if m else _missing("access list not found")))
     return "\n\n".join(parts)
 
 
@@ -442,22 +477,28 @@ def render_report(runlog: Path | None = None, availability_csv: Path | None = No
             "Run records by kind: " + ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items())) + f" (total {len(records)}).",
             f"Git commits recorded in the log: {', '.join(commits) if commits else _missing('no records')}.",
             f"FITS shape: length {fits_shape.length}, {fits_shape.channels} channel, batch {fits_shape.batch} "
-            "(p90 of equal-length dataset lengths; synthetic data, 512 series, 1 warmup + 3 timed epochs, 5 classes).",
+            f"(p90 of lengths over equal-length datasets, including those with unknown missingness: "
+            f"require_no_missing=False). Synthetic data; {_cfg_values(records, 'n_series')} series, "
+            f"{_cfg_values(records, 'warmup_epochs')} warmup + {_cfg_values(records, 'timed_epochs')} timed epochs "
+            f"(from record configs), {_n_classes()} classes.",
             "`s_per_epoch` is the mean over timed epochs of the FITS-shape record. When both idle and "
             "shared (other GPU tenants) records exist, the idle one is used; otherwise the latest "
             "shared or unmeasured record, flagged in `shared_flag`.", ""]
     out += ["## 2. Model table", "",
             md_table(table.drop(columns=["recipe_source", "pretraining_corpora", "notes"])), "",
-            "`params_used` = `params_total` minus `params_unused` (parts of the checkpoint removed "
-            "from the classifier, e.g. forecast decoders). `fits_*` values: yes, yes (grad ckpt), no (oom), "
+            "Params: `params_used` is the parameter count of the classifier actually built (probe field "
+            "`params_total`); `params_unused` is the checkpoint parameters removed from it (e.g. forecast "
+            "decoders; \"0 (adapter reports none)\" means the adapter defines no unused count); "
+            "`params_total` here = used + unused = checkpoint size. `params_source` names the mode and "
+            "record they came from (full preferred; lora counts include adapter parameters). `fits_*` values: yes, yes (grad ckpt), no (oom), "
             "timeout, not_run: <reason>, missing: <reason>.", "",
             "### Recipes, pretraining corpora and availability notes", ""]
     for _, r in table.iterrows():
         out.append(f"- **{r['model']}** (modes: {r['modes']}; hosted: {r['hosted']}). Recipe: "
-                   f"{sanitize(str(r['recipe_source']))}. Pretraining corpora (UCR/UEA exposure as stated "
+                   f"{sanitize(str(r['recipe_source']), 'recipe_source')}. Pretraining corpora (UCR/UEA exposure as stated "
                    f"by the adapter; labels such as inferred/not verified are kept): "
-                   f"{sanitize(str(r['pretraining_corpora']))}"
-                   + (f" Availability note: {sanitize(r['notes'])}" if r["notes"] else ""))
+                   f"{sanitize(str(r['pretraining_corpora']), 'pretraining_corpora')}"
+                   + (f" Availability note: {sanitize(r['notes'], 'availability note')}" if r["notes"] else ""))
     out += ["", "## 3. Probe grid", "",
             f"Planned cells: supported modes x {len(shapes)} grid shapes per model (no grad-ckpt retries). "
             "`timeout` and `not_run` are cells that were attempted and did not complete (the reason is in "
@@ -476,7 +517,8 @@ def render_report(runlog: Path | None = None, availability_csv: Path | None = No
     sd = sorted({r.config.get("dataset") for r in smoke if r.config.get("dataset")})
     out += ["## 6. Smoke runs", "",
             (f"{len(smoke)} smoke records on dataset(s) {', '.join(sd)} (training split only; "
-             "no evaluation of any kind). The dataset is declared pilot-exposed."
+             "no evaluation of any kind). The dataset is declared pilot-exposed. `mean_epoch_s` = sum of "
+             "recorded epoch times / number of epochs (no warmup epoch excluded)."
              if smoke else _missing("not yet run")), ""]
     if smoke:
         rows = []
@@ -485,7 +527,7 @@ def render_report(runlog: Path | None = None, availability_csv: Path | None = No
             ep = e.get("epoch_times_s") or []
             rows.append({"model": r.config.get("model"), "mode": r.config.get("mode"),
                          "status": r.status, "epochs": e.get("epochs"),
-                         "s_per_epoch": sum(ep) / len(ep) if ep else None,
+                         "mean_epoch_s (all epochs incl. first)": sum(ep) / len(ep) if ep else None,
                          "peak_reserved_mib": e.get("peak_gpu_mem_reserved_mib"),
                          "shared": shared_label(r)})
         out += [md_table(pd.DataFrame(rows)), ""]
@@ -499,7 +541,7 @@ def render_report(runlog: Path | None = None, availability_csv: Path | None = No
     reasons: dict[str, int] = {}
     for r in nr:
         reasons[r.status] = reasons.get(r.status, 0) + 1
-    out += ["## 9. Deviations and disclosures", "", sanitize(body), "",
+    out += ["## 9. Deviations and disclosures", "", sanitize(body, "deviations.md"), "",
             "Records with status not_run: " + (", ".join(f"{k} x{v}" for k, v in sorted(reasons.items()))
                                                if reasons else "none") + ".", ""]
     out += ["## 10. Open items for the user", "", OPEN_ITEMS]
@@ -518,12 +560,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--runlog", type=Path, default=None)
     ap.add_argument("--out", type=Path, default=None, help="write the report here (default stdout)")
-    ap.add_argument("--grid-csv", type=Path, default=None, help="write the probe-grid appendix CSV here")
+    ap.add_argument("--grid-csv", type=Path, default=None, help="probe-grid appendix CSV (default reports/phase0/probe_grid.csv)")
     args = ap.parse_args(argv)
     runlog = args.runlog or get_settings().runlog_path
-    if args.grid_csv:
-        args.grid_csv.parent.mkdir(parents=True, exist_ok=True)
-        probe_grid_table(read_all(runlog)).to_csv(args.grid_csv, index=False)
+    grid_csv = args.grid_csv or PHASE0 / "probe_grid.csv"
+    grid_csv.parent.mkdir(parents=True, exist_ok=True)
+    probe_grid_table(read_all(runlog)).to_csv(grid_csv, index=False)
     text = render_report(runlog)
     if args.out:
         args.out.write_text(text, encoding="utf-8")

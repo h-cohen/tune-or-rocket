@@ -1,6 +1,6 @@
 # Deviations and disclosures
 
-- Cache location: model weights, dataset downloads and probe logs live in `TOR_CACHE`, default `/data/hadar/tor-cache` (outside the repo; falls back to `cache/` in the repo only if /data is not writable); the location can be overridden with the environment variable.
+- Cache location (deviation from the design's repo-local `cache/`): model weights, dataset downloads and probe logs live in `TOR_CACHE`, default `/data/hadar/tor-cache`, because `/` had 63 GB free against 8 TB on `/data`; the repo `cache/` is only a fallback if `/data` is not writable, and the variable overrides both.
 - Reverso per-run timeout is 5400 s instead of the default 1800 s: the LoRA FITS cell needed about 650 s per epoch and timed out at 1800 s; each timeout is written into the record status.
 - Reverso timings reflect the pure-PyTorch reference implementation (Python-loop DeltaNet), not FlashFFTConv/fla kernels, and inputs are padded to 2048, so its compute is independent of series length.
 - The harness trainer applies warmup only (no cosine or other decay schedule), while several model recipes (e.g. Reverso, NuTime) cite cosine schedules; clipping and per-parameter-group learning rates are not represented either.
@@ -11,3 +11,6 @@
 - The smoke dataset (ShapeletSim, chosen by a seeded draw, training split only) is declared pilot-exposed: treat it as seen in any later selection or reporting.
 - The probe grid may be partial (about 1,400 cells would take days on two shared GPUs); the grid-completeness table lists exactly which cells ran, and fits-shape cells ran first.
 - Literature sources were not all accessible (OpenReview TS-LIMITS, ACML FMLTS list, Semantic Scholar, Google Scholar); absence of hits is not proof of absence.
+- `config_hash` excludes the git commit and the device, so resumed runs keep records made at earlier commits; `--force` re-runs a cell. Each record still stores its own commit.
+- FITS and probe lengths use `require_no_missing=False` (equal-length datasets including unknown missingness; missingness does not change compute shape): p90 is 1500, versus 1496 with the no-missing filter.
+- Metadata alias: `MixedShapesRegularTrain` (archive name) maps to `MixedShapes` in the published metadata CSV (sizes and length match).

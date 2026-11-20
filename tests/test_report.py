@@ -25,7 +25,7 @@ def info(name):
 def probe(model, mode, status="ok", shared=False, s_ep=1.0, ckpt=False, shape=SHAPE, extra=None):
     cfg = {"model": model, "mode": mode, "length": shape.length, "channels": shape.channels,
            "batch": shape.batch, "n_series": 512, "grad_ckpt": ckpt}
-    ex = {"s_per_epoch": s_ep, "params_total": 1000, "unused_params": 100,
+    ex = {"s_per_epoch": s_ep, "params_total": 1000, "unused_params": 100,  # used / removed
           "peak_gpu_mem_reserved_mib": 300.0}
     ex.update(extra or {})
     return new_record(f"p-{model}-{mode}", "probe", cfg, status,
@@ -79,8 +79,13 @@ def test_completed_beats_earlier_timeout():
 
 def test_params_used_is_total_minus_unused():
     t = table([probe("mantis8m", "full")])
+    # probe params_total = classifier (used); checkpoint total = used + unused
     assert (t.loc["mantis8m", "params_total"], t.loc["mantis8m", "params_unused"],
-            t.loc["mantis8m", "params_used"]) == (1000, 100, 900)
+            t.loc["mantis8m", "params_used"]) == (1100, 100, 1000)
+    assert t.loc["mantis8m", "params_source"].startswith("full: ")
+    r0 = probe("toto", "full", extra={"unused_params": 0})
+    assert table([r0]).loc["toto", "params_unused"] == "0 (adapter reports none)"
+    assert table([r0]).loc["toto", "params_total"] == 1000
     assert t.loc["mantis8m", "peak_alloc_mib (full)"] == "200"
     assert t.loc["mantis8m", "peak_reserved_mib (full)"] == "300"
 
@@ -110,6 +115,38 @@ def _render(tmp_path, recs):
     csv = tmp_path / "avail.csv"
     AVAIL.to_csv(csv, index=False)
     return report.render_report(_log(tmp_path, recs), csv, META, info, phase0_dir=tmp_path)
+
+
+def test_score_blocks_are_excluded_not_masked(tmp_path):
+    (tmp_path / "hc2_availability.md").write_text(
+        "## Coverage (datasets with a published result / datasets in our metadata)\n\n"
+        "| a | b |\n\nGood 0.8621 accuracy.\n\n## Usage restriction\n\nclean text 42\n")
+    text = _render(tmp_path, [])
+    assert "not embedded (see file)" in text
+    assert "0.8621" not in text and "clean text 42" in text
+
+
+def test_ckpt_needed_requires_decisive_records():
+    t = table([probe("mantis8m", "full", "oom"), probe("mantis8m", "full", "ok", ckpt=True)])
+    assert t.loc["mantis8m", "ckpt_needed"].startswith("missing")  # head not run
+
+
+def test_partial_peak_marked_and_flagged():
+    r = probe("unishape", "full", "not_run: timeout (1800 s)", extra={
+        "epoch_times_s": [1.0], "partial": {"peak_gpu_mem_mib": 777.0, "peak_gpu_mem_reserved_mib": 800.0}})
+    r.cost = {}
+    t = table([r])
+    assert t.loc["unishape", "peak_alloc_mib (full)"] == "\u2265777 (partial, timeout)"
+    assert t.loc["unishape", "shared_flag"] == "unmeasured"
+    assert t.loc["unishape", "fits_full_run_id"].startswith("p-unishape-full")
+
+
+def test_ckpt_retry_status_and_latest_nondone():
+    t = table([probe("mantis8m", "full", "oom"),
+               probe("mantis8m", "full", "not_run: timeout (1800 s)", ckpt=True)])
+    assert t.loc["mantis8m", "fits_full"] == "oom; grad-ckpt retry: not_run: timeout (1800 s)"
+    a, b = probe("m", "full", "error"), probe("m", "full", "not_run: x", shared=False)
+    assert report.pick([a, b]) is b
 
 
 def test_report_has_no_score_words(tmp_path):
