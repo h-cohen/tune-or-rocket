@@ -4,10 +4,11 @@ its deps (torch<3, transformers<6, ...) are compatible with the env, so it was i
 
 Chronos-Bolt (`chronos.chronos_bolt.ChronosBoltModelForForecasting`): T5 encoder-decoder forecaster.
 Classification uses the ENCODER only: `model.encode(context)` (instance standardisation -> patching
-(16, stride 16) -> `input_patch_embedding` -> [REG] token appended -> T5 encoder), tokens mean-pooled,
-as Jain et al. (arXiv 2611.06988, "Frozen Forecasters as Classifiers on MONSTER") use frozen
-Chronos-Bolt features (title/authors/abstract checked; the encoder-only + mean-pooling detail was NOT
-verified against the paper text, it is the task specification). The decoder and
+(16, stride 16) -> `input_patch_embedding` -> [REG] token appended -> T5 encoder), final encoder states
+mean-pooled over the PATCH tokens, EXCLUDING the summary [REG] token. This matches Jain et al.
+(arXiv 2611.06988, "Frozen Forecasters as Classifiers on MONSTER", App. B), who pool final encoder
+states over patch tokens without [REG]; they report both mean and max pooling (Sec. 3), the harness
+uses mean; they used Chronos-Bolt-base only. The decoder and
 `output_patch_embedding` are deleted from classifiers (unused, so trainable counts are honest).
 Univariate: per channel, embeddings concatenated (d = d_model * C).
 
@@ -17,8 +18,9 @@ feeds each variate as a row of `Chronos2Model.encode(context=(n*C, L), group_ids
 one series share a group id, so the group-attention layers mix the channels of a series; it returns
 (n_variates, num_patches + 2, d). The adapter does exactly this and mean-pools tokens per row; the C
 row embeddings are concatenated (d = 768 * C, head sized from n_channels). Pooled tokens: the context
-patches plus the [REG] token; the final masked future-output patch token (placeholder for the forecast
-horizon, `encode` always appends one) is excluded. Chronos-2 internal scaling: standardise then arcsinh.
+patch tokens only; [REG] and the final masked future-output patch token (placeholder for the forecast
+horizon, `encode` always appends one) are excluded. Same rule as Bolt by harness choice (no external
+protocol exists for Chronos-2 classification). Chronos-2 internal scaling: standardise then arcsinh.
 
 Length (`preprocess`): both packages truncate to the last `context_length` observations
 (chronos_bolt.py `encode`: `context[..., -context_length:]`, 2048; chronos2/model.py
@@ -95,18 +97,22 @@ class _Backbone(nn.Module):
         self.d_model = model.config.d_model
         self.patch = model.chronos_config.input_patch_size
 
+    def tokens(self, rows: torch.Tensor, n: int, c: int) -> tuple[torch.Tensor, int]:
+        """Encoder hidden states (n*c, T, d) and the number of leading patch tokens."""
+        if self.kind == "bolt":
+            hidden = self.model.encode(rows)[0]  # patches, then [REG] appended last
+            n_patch = hidden.shape[1] - (1 if self.model.chronos_config.use_reg_token else 0)
+        else:
+            gid = torch.arange(n, device=rows.device).repeat_interleave(c)
+            enc, _, _, n_patch = self.model.encode(context=rows, group_ids=gid)
+            hidden = enc[0]  # patches, [REG], masked future-output patch
+        return hidden, n_patch
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         n, c, length = x.shape
         rows = x.reshape(n * c, length)
-        if self.kind == "bolt":
-            hidden = self.model.encode(rows)[0]  # (n*c, patches [+REG], d); all tokens real
-            pooled = hidden.mean(dim=1)
-        else:
-            gid = torch.arange(n, device=x.device).repeat_interleave(c)
-            enc, _, _, n_ctx = self.model.encode(context=rows, group_ids=gid)
-            hidden = enc[0]  # (n*c, n_ctx [+REG] + 1 future-output patch, d)
-            n_keep = hidden.shape[1] - 1  # drop the masked future-output placeholder token
-            pooled = hidden[:, :n_keep].mean(dim=1)
+        hidden, n_patch = self.tokens(rows, n, c)
+        pooled = hidden[:, :n_patch].mean(dim=1)  # patch tokens only; [REG] / future token excluded
         return pooled.reshape(n, c * self.d_model)
 
 

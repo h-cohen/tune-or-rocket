@@ -95,3 +95,26 @@ def test_bolt_channels_independent():
     x2 = x.clone()
     x2[:, 1] = torch.randn(2, 64)
     assert torch.allclose(e[:, :512], a.embed(x2)[:, :512], atol=1e-4)
+
+
+@pytest.mark.parametrize("name", ["chronos-bolt-small", "chronos2"])
+def test_chronos_pooling_is_patch_tokens_only(name):
+    a = get_adapter(name)()
+    a.load("pretrained")
+    x = a.preprocess(np.random.default_rng(0).standard_normal((2, 2, 100)))  # 100 -> 7 patches of 16
+    n, c, _ = x.shape
+    rows = x.reshape(n * c, -1)
+    with torch.no_grad():
+        hidden, n_patch = a._backbone.tokens(rows, n, c)
+        assert n_patch == 7
+        extra = hidden.shape[1] - n_patch  # [REG] (+ future-output token for chronos2)
+        assert extra == (1 if name != "chronos2" else 2)
+        if name == "chronos2":  # same hidden states as the package's own encode()
+            gid = torch.arange(n).repeat_interleave(c)
+            ref = a._model.encode(context=rows, group_ids=gid)[0][0]
+        else:
+            ref = a._model.encode(rows)[0]
+        assert torch.equal(hidden, ref)
+        want = hidden[:, :7].mean(dim=1).reshape(n, -1)
+        assert torch.allclose(a.embed(x), want, atol=1e-6)
+        assert not torch.allclose(want, hidden.mean(dim=1).reshape(n, -1), atol=1e-6)  # [REG] excluded
