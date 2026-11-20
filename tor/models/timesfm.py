@@ -42,7 +42,12 @@ LoRA: peft on `qkv_proj` (fused q,k,v projection; the model has no separate q/k/
 Gradient checkpointing: torch.utils.checkpoint (non-reentrant) around each `stacked_xf` layer, training
 mode only (the package implements none).
 
-Params (loaded pretrained, with forecast heads): see tests/models/test_timesfm.py (measured).
+Params (measured): loaded pretrained total 231,289,280 (with forecast heads) - unused forecast heads
+32,768,000 = 198,521,280 used by the classifier backbone, which matches the "200M" in the model name by
+measured subtraction (the model card does not itemise).
+
+Note: `_Backbone.pad` pads fewer than 32 points, so it never yields a fully padded patch; the
+fully-padded-patch exclusion in pooling only matters for package-style masks (padding to a fixed context).
 
 Recipe: no published classification fine-tuning recipe was found (the TimesFM paper, arXiv 2310.10688, and
 the repo evaluate forecasting; search of paper/repo/model card only, not exhaustive) -> harness default.

@@ -26,7 +26,9 @@ def test_timesfm_params_weights_scratch_lora():
     total, _ = count_params(a._model)
     unused = a.unused_param_count()
     print(f"[timesfm25] pretrained params (with forecast heads): {total}; unused by classifier: {unused}")
-    assert 190_000_000 < total < 250_000_000  # model card: 200M
+    assert 190_000_000 < total < 250_000_000  # measured sanity bound
+    # measured subtraction: total - forecast heads = 198,521,280, within 1% of the name's "200M"
+    assert abs((total - unused) - 200_000_000) / 200_000_000 < 0.01
 
     with safe_open(hf_hub_download(_REPO, _WEIGHTS, **_hub_kwargs()), "pt") as f:
         ck = f.get_tensor(KEY)
@@ -118,3 +120,12 @@ def test_timesfm_channels_independent_and_nan_free():
     x2 = x.clone()
     x2[:, 1] = torch.randn(2, 64)
     assert torch.allclose(e[:, :1280], a.embed(x2)[:, :1280], atol=1e-4)
+
+
+def test_timesfm_short_and_constant_inputs_finite():
+    a = _adapter()
+    short = a.preprocess(np.random.default_rng(0).standard_normal((2, 1, 5)))
+    const = torch.full((2, 1, 64), 3.0)  # sigma 0
+    for x in (short, const):
+        e = a.embed(x)
+        assert tuple(e.shape) == (2, 1280) and torch.isfinite(e).all()
